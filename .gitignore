@@ -16,3 +16,6 @@ book_audio/
 chunks/
 voices.json
 kokoro-v0_19.onnx
+/epubs/
+/audios/
+/chunks/

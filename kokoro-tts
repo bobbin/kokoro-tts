@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 import soundfile as sf
 import sounddevice as sd
 from kokoro_onnx import Kokoro
+import numpy as np
 
 warnings.filterwarnings("ignore", category=UserWarning, module='ebooklib')
 warnings.filterwarnings("ignore", category=FutureWarning, module='ebooklib')
@@ -156,12 +157,33 @@ def print_supported_voices():
         sys.exit(1)
 
 def validate_voice(voice, kokoro):
-    """Validate if the voice is supported."""
+    """Validate if the voice is supported and handle voice blending."""
     try:
         supported_voices = set(kokoro.get_voices())
+        
+        # Check if it's a blend request (comma separated voices)
+        if ',' in voice:
+            voices = [v.strip() for v in voice.split(',')]
+            if len(voices) != 2:
+                raise ValueError("Voice blending requires exactly 2 voices separated by comma")
+                
+            # Validate each voice
+            for v in voices:
+                if v not in supported_voices:
+                    supported_voices_list = ', '.join(sorted(supported_voices))
+                    raise ValueError(f"Unsupported voice: {v}\nSupported voices are: {supported_voices_list}")
+            
+            # Create the blended voice style
+            style1 = kokoro.get_voice_style(voices[0])
+            style2 = kokoro.get_voice_style(voices[1])
+            # Default to 50-50 blend
+            blend = np.add(style1 * (50/100), style2 * (50/100))
+            return blend
+            
+        # Single voice validation
         if voice not in supported_voices:
-            supported_voices = ', '.join(sorted(supported_voices))
-            raise ValueError(f"Unsupported voice: {voice}\nSupported voices are: {supported_voices}")
+            supported_voices_list = ', '.join(sorted(supported_voices))
+            raise ValueError(f"Unsupported voice: {voice}\nSupported voices are: {supported_voices_list}")
         return voice
     except Exception as e:
         print(f"Error getting supported voices: {e}")
@@ -371,10 +393,15 @@ def extract_chapters_from_epub(epub_file, debug=False):
     
     return chapters
 
-def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str, speed: float, lang: str) -> tuple[list[float] | None, int | None]:
+def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str | np.ndarray, speed: float, lang: str) -> tuple[list[float] | None, int | None]:
     """Process a single chunk of text sequentially."""
     try:
-        samples, sample_rate = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
+        # If voice is already a numpy array (blended voice), pass it directly
+        if isinstance(voice, np.ndarray):
+            samples, sample_rate = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
+        else:
+            # Otherwise use it as a voice name string
+            samples, sample_rate = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
         return samples, sample_rate
     except Exception as e:
         print(f"\nError processing chunk: {e}")
@@ -395,11 +422,24 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
         else:
             # Interactive voice selection
             voices = list_available_voices(kokoro)
+            print("\nTip: You can blend two voices by entering two numbers separated by comma (e.g., '7,11')")
             try:
-                voice_choice = int(input("Choose a voice by number: ")) - 1
-                if voice_choice < 0 or voice_choice >= len(voices):
-                    raise ValueError("Invalid choice")
-                voice = voices[voice_choice]
+                voice_input = input("Choose voice(s) by number: ")
+                if ',' in voice_input:
+                    # Handle blended voices
+                    v1, v2 = map(lambda x: int(x.strip()) - 1, voice_input.split(','))
+                    if not (0 <= v1 < len(voices) and 0 <= v2 < len(voices)):
+                        raise ValueError("Invalid voice numbers")
+                    # Create blend using the actual voice names
+                    voice = f"{voices[v1]},{voices[v2]}"
+                else:
+                    # Single voice
+                    voice_choice = int(voice_input) - 1
+                    if not (0 <= voice_choice < len(voices)):
+                        raise ValueError("Invalid choice")
+                    voice = voices[voice_choice]
+                # Validate and potentially convert to blend
+                voice = validate_voice(voice, kokoro)
             except (ValueError, IndexError):
                 print("Invalid choice. Using default voice.")
                 voice = "af_sarah"  # default voice
