@@ -60,9 +60,16 @@ conversion_jobs = {}
 def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.0, lang: str = "en-us"):
     """Synchronous processing function to run in thread pool"""
     try:
-        # Update job status
-        conversion_jobs[job_id].status = "processing"
-        conversion_jobs[job_id].progress = 0.0
+        # Asegurarnos de que el progreso empieza en 0
+        conversion_jobs[job_id] = ConversionStatus(
+            job_id=job_id,
+            status="processing",
+            progress=0.0
+        )
+        
+        # Create job-specific directory for split output
+        split_output = os.path.join(PROCESSING_DIR, job_id)
+        os.makedirs(split_output, exist_ok=True)
         
         # Extraer título del EPUB
         import ebooklib
@@ -89,10 +96,6 @@ def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.
         job_output_dir = os.path.join(OUTPUT_DIR, job_id)
         os.makedirs(job_output_dir, exist_ok=True)
         
-        # Create job-specific directory for split output
-        split_output = os.path.join(PROCESSING_DIR, job_id)
-        os.makedirs(split_output, exist_ok=True)
-        
         logger.info(f"Processing EPUB file for job {job_id}")
         
         # Definir el archivo de salida final
@@ -101,7 +104,7 @@ def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.
         
         # Crear una función de callback para actualizar el progreso
         def progress_callback(current_chapter: int, total_chapters: int):
-            progress = (current_chapter / total_chapters) * 100
+            progress = (current_chapter / total_chapters) * 90  # Dejamos 10% para el merge
             conversion_jobs[job_id].progress = progress
             logger.info(f"Job {job_id} progress: {progress:.1f}%")
         
@@ -116,7 +119,7 @@ def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.
             format="mp3",
             debug=True,
             interactive=False,
-            progress_callback=progress_callback  # Pasar la función de callback
+            progress_callback=progress_callback
         )
         
         # Merge chunks después de procesar
