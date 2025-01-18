@@ -408,7 +408,8 @@ def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str | np.ndarray
         return None, None
 
 def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, lang="en-us", 
-                         stream=False, split_output=None, format="wav", debug=False):
+                         stream=False, split_output=None, format="wav", debug=False, 
+                         interactive=True):
     global stop_spinner
     # Load Kokoro model
     try:
@@ -420,29 +421,29 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
         if voice:
             voice = validate_voice(voice, kokoro)
         else:
-            # Interactive voice selection
-            voices = list_available_voices(kokoro)
-            print("\nTip: You can blend two voices by entering two numbers separated by comma (e.g., '7,11')")
-            try:
-                voice_input = input("Choose voice(s) by number: ")
-                if ',' in voice_input:
-                    # Handle blended voices
-                    v1, v2 = map(lambda x: int(x.strip()) - 1, voice_input.split(','))
-                    if not (0 <= v1 < len(voices) and 0 <= v2 < len(voices)):
-                        raise ValueError("Invalid voice numbers")
-                    # Create blend using the actual voice names
-                    voice = f"{voices[v1]},{voices[v2]}"
-                else:
-                    # Single voice
-                    voice_choice = int(voice_input) - 1
-                    if not (0 <= voice_choice < len(voices)):
-                        raise ValueError("Invalid choice")
-                    voice = voices[voice_choice]
-                # Validate and potentially convert to blend
-                voice = validate_voice(voice, kokoro)
-            except (ValueError, IndexError):
-                print("Invalid choice. Using default voice.")
-                voice = "af_sarah"  # default voice
+            # Interactive voice selection solo si interactive=True
+            if interactive:
+                voices = list_available_voices(kokoro)
+                print("\nTip: You can blend two voices by entering two numbers separated by comma (e.g., '7,11')")
+                try:
+                    voice_input = input("Choose voice(s) by number: ")
+                    if ',' in voice_input:
+                        v1, v2 = map(lambda x: int(x.strip()) - 1, voice_input.split(','))
+                        if not (0 <= v1 < len(voices) and 0 <= v2 < len(voices)):
+                            raise ValueError("Invalid voice numbers")
+                        voice = f"{voices[v1]},{voices[v2]}"
+                    else:
+                        voice_choice = int(voice_input) - 1
+                        if not (0 <= voice_choice < len(voices)):
+                            raise ValueError("Invalid choice")
+                        voice = voices[voice_choice]
+                    voice = validate_voice(voice, kokoro)
+                except (ValueError, IndexError):
+                    print("Invalid choice. Using default voice.")
+                    voice = "af_sarah"  # default voice
+            else:
+                voice = "af_sarah"  # default voice cuando no es interactivo
+    
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -472,8 +473,10 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
                 print(f"    Words: {word_count:,}")
                 print(f"    Duration: {word_count / 150:.1f} minutes")
         
-        print("\nPress Enter to start processing, or Ctrl+C to cancel...")
-        input()
+        # Solo pedimos confirmación si interactive=True
+        if interactive:
+            print("\nPress Enter to start processing, or Ctrl+C to cancel...")
+            input()
         
         if split_output:
             os.makedirs(split_output, exist_ok=True)
