@@ -409,7 +409,7 @@ def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str | np.ndarray
 
 def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, lang="en-us", 
                          stream=False, split_output=None, format="wav", debug=False, 
-                         interactive=True):
+                         interactive=True, progress_callback=None):
     global stop_spinner
     # Load Kokoro model
     try:
@@ -483,6 +483,7 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
             
             # First create all chapter directories and info files
             print("\nCreating chapter directories and info files...")
+            total_chapters = len(chapters)
             for chapter_num, chapter in enumerate(chapters, 1):
                 chapter_dir = os.path.join(split_output, f"chapter_{chapter_num:03d}")
                 os.makedirs(chapter_dir, exist_ok=True)
@@ -498,6 +499,11 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
             print("Created chapter directories and info files")
             
             # Continue with existing processing code...
+            
+            # Llamar al callback de progreso si existe
+            if progress_callback:
+                progress_callback(chapter_num, total_chapters)
+            
     else:
         with open(input_file, 'r', encoding='utf-8') as file:
             text = file.read()

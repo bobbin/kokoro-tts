@@ -62,6 +62,32 @@ def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.
     try:
         # Update job status
         conversion_jobs[job_id].status = "processing"
+        conversion_jobs[job_id].progress = 0.0
+        
+        # Extraer título del EPUB
+        import ebooklib
+        from ebooklib import epub
+        book = epub.read_epub(epub_path)
+        
+        # Intentar obtener el título de diferentes fuentes
+        title = None
+        try:
+            # Intentar desde metadata
+            if book.get_metadata('DC', 'title'):
+                title = book.get_metadata('DC', 'title')[0][0]
+            # Si no hay título en metadata, usar el nombre del archivo
+            if not title:
+                title = os.path.splitext(os.path.basename(epub_path))[0]
+            # Limpiar el título para usarlo como nombre de archivo
+            title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+            title = title.replace(' ', '_')
+        except Exception as e:
+            logger.warning(f"Could not extract title from EPUB: {e}")
+            title = "audiobook"
+        
+        # Crear directorio para el job
+        job_output_dir = os.path.join(OUTPUT_DIR, job_id)
+        os.makedirs(job_output_dir, exist_ok=True)
         
         # Create job-specific directory for split output
         split_output = os.path.join(PROCESSING_DIR, job_id)
@@ -70,19 +96,27 @@ def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.
         logger.info(f"Processing EPUB file for job {job_id}")
         
         # Definir el archivo de salida final
-        output_file = os.path.join(OUTPUT_DIR, f"{job_id}.mp3")
+        output_file = os.path.join(job_output_dir, f"{title}.mp3")
+        logger.info(f"Will save final output to: {output_file}")
+        
+        # Crear una función de callback para actualizar el progreso
+        def progress_callback(current_chapter: int, total_chapters: int):
+            progress = (current_chapter / total_chapters) * 100
+            conversion_jobs[job_id].progress = progress
+            logger.info(f"Job {job_id} progress: {progress:.1f}%")
         
         # Procesar el EPUB
         convert_text_to_audio(
             input_file=epub_path,
-            output_file=None,  # No generamos el output aquí
+            output_file=None,
             voice=voice,
             speed=speed,
             lang=lang,
             split_output=split_output,
             format="mp3",
             debug=True,
-            interactive=False
+            interactive=False,
+            progress_callback=progress_callback  # Pasar la función de callback
         )
         
         # Merge chunks después de procesar
@@ -105,9 +139,12 @@ def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.
             
             # Combinar todos los capítulos
             combined = AudioSegment.empty()
-            for chapter_file in chapter_files:
+            for i, chapter_file in enumerate(chapter_files, 1):
                 audio = AudioSegment.from_mp3(chapter_file)
                 combined += audio
+                # Actualizar progreso durante el merge
+                merge_progress = 90 + (i / len(chapter_files) * 10)  # 90-100%
+                conversion_jobs[job_id].progress = merge_progress
                 logger.info(f"Added chapter: {os.path.basename(chapter_file)}")
             
             # Exportar el archivo final
@@ -116,6 +153,7 @@ def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.
             
             # Update job status
             conversion_jobs[job_id].status = "completed"
+            conversion_jobs[job_id].progress = 100.0
             conversion_jobs[job_id].output_file = output_file
         else:
             raise FileNotFoundError("No chapter files found to merge")
@@ -128,12 +166,18 @@ def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.
         logger.error(f"Error processing job {job_id}: {e}")
         conversion_jobs[job_id].status = "failed"
         conversion_jobs[job_id].error = str(e)
+        # Limpiar directorio de salida si hubo error
+        if os.path.exists(job_output_dir):
+            shutil.rmtree(job_output_dir)
         
     finally:
-        # Remove uploaded file
+        # Remove uploaded file and processing directory
         if os.path.exists(epub_path):
             os.remove(epub_path)
             logger.info(f"Removed uploaded file: {epub_path}")
+        if os.path.exists(split_output):
+            shutil.rmtree(split_output)
+            logger.info(f"Cleaned up processing directory: {split_output}")
 
 async def process_epub(job_id: str, epub_path: str, voice: str, speed: float = 1.0, lang: str = "en-us"):
     """Asynchronous wrapper for processing function"""
