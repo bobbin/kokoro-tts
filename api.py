@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks, Form, File
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import os
 import uuid
@@ -28,6 +29,15 @@ app = FastAPI(
     title="Kokoro TTS API",
     description="API for converting EPUB books to audio using Kokoro TTS",
     version="1.0.0"
+)
+
+# Configurar CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En producción, cambia esto por la URL específica de tu frontend
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Configuration
