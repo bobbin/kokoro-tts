@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-multipart
+soundfile
+sounddevice
+kokoro-onnx
+ebooklib
+beautifulsoup4
+pydub
+ffmpeg-python
+onnxruntime-gpu
