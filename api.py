@@ -3,7 +3,7 @@ VOLUME_PATH = "./models"
 
 @asgi(
     name="epub2audiobook",
-    image=Image(env_vars=["ONNX_PROVIDER=CUDAExecutionProvider"]).add_commands(["apt-get update", "apt-get install -y libportaudio2"]).add_python_packages(["fastapi", "uvicorn", "python-multipart", "soundfile", "sounddevice", "kokoro-onnx[gpu]", "ebooklib", "beautifulsoup4", "pydub", "ffmpeg-python", "onnxruntime-gpu"]).add_commands(["pip uninstall onnxrutime","pip install onnxruntime-gpu"]),
+    image=Image(base_image="docker.io/nvidia/cuda:12.4.0-runtime-ubuntu22.04",env_vars=["ONNX_PROVIDER=CUDAExecutionProvider"]).add_commands(["apt-get update", "apt-get install -y libportaudio2", "apt-get install -y nvidia-docker2", "apt-get -y install cudnn9-cuda-12"]).add_python_packages(["fastapi", "uvicorn", "python-multipart", "soundfile", "sounddevice", "kokoro-onnx", "ebooklib", "beautifulsoup4", "pydub", "ffmpeg-python"]).add_commands(["pip uninstall -y onnxruntime-gpu","pip install onnxruntime-gpu==1.20.0"]),
     volumes=[Volume(name="models", mount_path=VOLUME_PATH)],
     memory=4096,
     gpu="A10G"
