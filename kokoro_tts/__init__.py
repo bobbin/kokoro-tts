@@ -16,7 +16,7 @@ from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 import soundfile as sf
 import sounddevice as sd
-from kokoro_onnx import Kokoro
+from kokoro_onnx[gpu] import Kokoro
 import numpy as np
 
 warnings.filterwarnings("ignore", category=UserWarning, module='ebooklib')
@@ -25,7 +25,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module='ebooklib')
 # Global flag to stop the spinner and audio
 stop_spinner = False
 stop_audio = False
-
+VOLUME_PATH = "./models"
 def spinning_wheel(message="Processing...", progress=None):
     """Display a spinning wheel with a message."""
     spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
@@ -133,7 +133,7 @@ Examples:
 def print_supported_languages():
     """Print all supported languages from Kokoro."""
     try:
-        kokoro = Kokoro("kokoro-v0_19.onnx", "voices.json")
+        kokoro = Kokoro(os.path.join(VOLUME_PATH, "kokoro-v0_19.onnx"), os.path.join(VOLUME_PATH, "voices.json"))
         languages = sorted(kokoro.get_languages())
         print("\nSupported languages:")
         for lang in languages:
@@ -146,7 +146,7 @@ def print_supported_languages():
 def print_supported_voices():
     """Print all supported voices from Kokoro."""
     try:
-        kokoro = Kokoro("kokoro-v0_19.onnx", "voices.json")
+        kokoro = Kokoro(os.path.join(VOLUME_PATH, "kokoro-v0_19.onnx"), os.path.join(VOLUME_PATH, "voices.json"))
         voices = sorted(kokoro.get_voices())
         print("\nSupported voices:")
         for idx, voice in enumerate(voices):
@@ -413,7 +413,7 @@ def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, l
     global stop_spinner
     # Load Kokoro model
     try:
-        kokoro = Kokoro("kokoro-v0_19.onnx", "voices.json")
+        kokoro = Kokoro(os.path.join(VOLUME_PATH, "kokoro-v0_19.onnx"), os.path.join(VOLUME_PATH, "voices.json"))
         # Validate language after loading model
         lang = validate_language(lang, kokoro)
         

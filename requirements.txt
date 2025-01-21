@@ -3,9 +3,9 @@ uvicorn
 python-multipart
 soundfile
 sounddevice
-kokoro-onnx
+kokoro-onnx[gpu]
 ebooklib
 beautifulsoup4
 pydub
 ffmpeg-python
-onnxruntime-gpu
+onnxruntime

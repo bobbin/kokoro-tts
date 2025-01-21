@@ -1,4 +1,0 @@
-Title: Copyright Notice
-Order: 1
-Words: 101
-Estimated Duration: 0.7 minutes

@@ -1,4 +1,0 @@
-Title: Tor Books by John Scalzi
-Order: 4
-Words: 368
-Estimated Duration: 2.5 minutes
