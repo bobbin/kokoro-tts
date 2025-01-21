@@ -3,7 +3,7 @@ VOLUME_PATH = "./models"
 
 @asgi(
     name="epub2audiobook",
-    image=Image().from_dockerfile("./Dockerfile").add_python_packages(["fastapi", "uvicorn", "python-multipart", "soundfile", "sounddevice", "kokoro-onnx[gpu]", "ebooklib", "beautifulsoup4", "pydub", "ffmpeg-python", "onnxruntime"]),
+    image=Image(env_vars=["ONNX_PROVIDER=CUDAExecutionProvider"]).add_commands(["apt-get update", "apt-get install -y libportaudio2"]).add_python_packages(["fastapi", "uvicorn", "python-multipart", "soundfile", "sounddevice", "kokoro-onnx[gpu]", "ebooklib", "beautifulsoup4", "pydub", "ffmpeg-python", "onnxruntime-gpu"]).add_commands(["pip uninstall onnxrutime","pip install onnxruntime-gpu"]),
     volumes=[Volume(name="models", mount_path=VOLUME_PATH)],
     memory=4096,
     gpu="A10G"
@@ -55,8 +55,8 @@ def handler(context):
     UPLOAD_DIR = "/app/uploads"
     OUTPUT_DIR = "/app/outputs"
     PROCESSING_DIR = "/app/processing"
-    # for dir_path in [UPLOAD_DIR, OUTPUT_DIR, PROCESSING_DIR]:
-    #     os.makedirs(dir_path, exist_ok=True)
+    for dir_path in [UPLOAD_DIR, OUTPUT_DIR, PROCESSING_DIR]:
+        os.makedirs(dir_path, exist_ok=True)
 
     # Initialize thread pool
     thread_pool = ThreadPoolExecutor(max_workers=3)  # Ajusta según necesidades

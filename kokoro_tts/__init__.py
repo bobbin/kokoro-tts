@@ -16,7 +16,7 @@ from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 import soundfile as sf
 import sounddevice as sd
-from kokoro_onnx[gpu] import Kokoro
+from kokoro_onnx import Kokoro
 import numpy as np
 
 warnings.filterwarnings("ignore", category=UserWarning, module='ebooklib')
