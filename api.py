@@ -10,11 +10,11 @@ import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
+from gradio_client import Client
 
 # Import Kokoro processing functions
 from kokoro_tts import (
     convert_text_to_audio,
-    Kokoro,
     validate_voice
 )
 
@@ -50,11 +50,11 @@ for dir_path in [UPLOAD_DIR, OUTPUT_DIR, PROCESSING_DIR]:
 # Initialize thread pool
 thread_pool = ThreadPoolExecutor(max_workers=3)  # Ajusta según necesidades
 
-# Initialize Kokoro model
+# Initialize Hugging Face client
 try:
-    kokoro = Kokoro("kokoro-v0_19.onnx", "voices.json")
+    client = Client("bobbin28/Kokoro-TTS-Zero", hf_token=os.environ.get("HUGGING_FACE_TOKEN"))
 except Exception as e:
-    logger.error(f"Failed to initialize Kokoro model: {e}")
+    logger.error(f"Failed to initialize Hugging Face client: {e}")
     raise
 
 class ConversionStatus(BaseModel):
@@ -227,7 +227,7 @@ async def convert_epub(
         
         # Validate voice
         try:
-            voice = validate_voice(voice, kokoro)
+            voice = validate_voice(voice)
         except ValueError as e:
             raise HTTPException(
                 status_code=400,
@@ -255,47 +255,47 @@ async def convert_epub(
             progress=0.0
         )
         
-        # Start background processing
-        background_tasks.add_task(process_epub, job_id, epub_path, voice, speed, lang)
+        # Start processing in background
+        background_tasks.add_task(
+            process_epub,
+            job_id,
+            epub_path,
+            voice,
+            speed,
+            lang
+        )
         
-        return {
-            "job_id": job_id, 
-            "message": "Conversion started",
-            "status": "queued"
-        }
+        return {"job_id": job_id}
         
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Error starting conversion: {e}")
+        logger.error(f"Error in convert_epub: {e}")
         raise HTTPException(
             status_code=500,
-            detail={"type": "server_error", "msg": "Internal server error"}
+            detail={"type": "server_error", "msg": str(e)}
         )
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
-    """Get the status of a conversion job"""
+    """Get status of a conversion job"""
     if job_id not in conversion_jobs:
-        raise HTTPException(404, "Job not found")
+        raise HTTPException(status_code=404, detail="Job not found")
     return conversion_jobs[job_id]
 
 @app.get("/voices")
 async def list_voices():
     """Get list of available voices"""
     try:
-        voices = list(kokoro.get_voices())
+        response = client.predict(api_name="/initialize_model")
+        voices = [voice[0] for voice in response['choices']]
         return {"voices": voices}
     except Exception as e:
         logger.error(f"Error getting voices: {e}")
-        raise HTTPException(500, "Internal server error")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/languages")
 async def list_languages():
     """Get list of supported languages"""
-    try:
-        languages = list(kokoro.get_languages())
-        return {"languages": languages}
-    except Exception as e:
-        logger.error(f"Error getting languages: {e}")
-        raise HTTPException(500, "Internal server error") 
+    # Since we don't have direct access to supported languages through the API,
+    # we'll maintain a list of known supported languages
+    languages = ["en-us", "es-es", "fr-fr", "de-de", "it-it", "pt-br", "ja-jp"]
+    return {"languages": languages} 

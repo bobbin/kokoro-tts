@@ -16,8 +16,8 @@ from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 import soundfile as sf
 import sounddevice as sd
-from kokoro_onnx import Kokoro
 import numpy as np
+from gradio_client import Client
 
 warnings.filterwarnings("ignore", category=UserWarning, module='ebooklib')
 warnings.filterwarnings("ignore", category=FutureWarning, module='ebooklib')
@@ -25,6 +25,9 @@ warnings.filterwarnings("ignore", category=FutureWarning, module='ebooklib')
 # Global flag to stop the spinner and audio
 stop_spinner = False
 stop_audio = False
+
+# Initialize Hugging Face client
+client = Client("bobbin28/Kokoro-TTS-Zero", hf_token=os.environ.get("HUGGING_FACE_TOKEN"))
 
 def spinning_wheel(message="Processing...", progress=None):
     """Display a spinning wheel with a message."""
@@ -41,12 +44,19 @@ def spinning_wheel(message="Processing...", progress=None):
     sys.stdout.write('\r' + ' ' * (len(message) + 50) + '\r')
     sys.stdout.flush()
 
-def list_available_voices(kokoro):
-    voices = list(kokoro.get_voices())
-    print("Available voices:")
-    for idx, voice in enumerate(voices):
-        print(f"{idx + 1}. {voice}")
-    return voices
+def list_available_voices():
+    """Get available voices from the API."""
+    try:
+        response = client.predict(api_name="/initialize_model")
+        # La respuesta viene como un diccionario con una lista de pares [id, nombre]
+        voices = [voice[0] for voice in response['choices']]
+        print("Available voices:")
+        for idx, voice in enumerate(voices):
+            print(f"{idx + 1}. {voice}")
+        return voices
+    except Exception as e:
+        print(f"Error getting available voices: {e}")
+        return []
 
 def extract_text_from_epub(epub_file):
     book = epub.read_epub(epub_file)
@@ -85,17 +95,15 @@ def chunk_text(text, chunk_size=2000):
     
     return chunks
 
-def validate_language(lang, kokoro):
+def validate_language(lang):
     """Validate if the language is supported."""
-    try:
-        supported_languages = set(kokoro.get_languages())  # Get supported languages from Kokoro
-        if lang not in supported_languages:
-            supported_langs = ', '.join(sorted(supported_languages))
-            raise ValueError(f"Unsupported language: {lang}\nSupported languages are: {supported_langs}")
-        return lang
-    except Exception as e:
-        print(f"Error getting supported languages: {e}")
-        sys.exit(1)
+    # Since we don't have direct access to supported languages through the API,
+    # we'll maintain a list of known supported languages
+    supported_languages = {"en-us", "es-es", "fr-fr", "de-de", "it-it", "pt-br", "ja-jp"}
+    if lang not in supported_languages:
+        supported_langs = ', '.join(sorted(supported_languages))
+        raise ValueError(f"Unsupported language: {lang}\nSupported languages are: {supported_langs}")
+    return lang
 
 def print_usage():
     print("""
@@ -131,35 +139,35 @@ Examples:
     """)
 
 def print_supported_languages():
-    """Print all supported languages from Kokoro."""
+    """Print all supported languages."""
     try:
-        kokoro = Kokoro("kokoro-v0_19.onnx", "voices.json")
-        languages = sorted(kokoro.get_languages())
+        # Since we don't have direct access to supported languages through the API,
+        # we'll maintain a list of known supported languages
+        languages = ["en-us", "es-es", "fr-fr", "de-de", "it-it", "pt-br", "ja-jp"]
         print("\nSupported languages:")
-        for lang in languages:
+        for lang in sorted(languages):
             print(f"    {lang}")
         print()
     except Exception as e:
-        print(f"Error loading model to get supported languages: {e}")
-        sys.exit(1)
+        raise RuntimeError(f"Error getting supported languages: {str(e)}")
 
 def print_supported_voices():
-    """Print all supported voices from Kokoro."""
+    """Print all supported voices."""
     try:
-        kokoro = Kokoro("kokoro-v0_19.onnx", "voices.json")
-        voices = sorted(kokoro.get_voices())
+        response = client.predict(api_name="/initialize_model")
+        voices = [voice[0] for voice in response['choices']]
         print("\nSupported voices:")
         for idx, voice in enumerate(voices):
             print(f"    {idx + 1}. {voice}")
         print()
     except Exception as e:
-        print(f"Error loading model to get supported voices: {e}")
-        sys.exit(1)
+        raise RuntimeError(f"Error getting supported voices: {str(e)}")
 
-def validate_voice(voice, kokoro):
-    """Validate if the voice is supported and handle voice blending."""
+def validate_voice(voice):
+    """Validate if the voice is supported."""
     try:
-        supported_voices = set(kokoro.get_voices())
+        response = client.predict(api_name="/initialize_model")
+        supported_voices = {voice[0] for voice in response['choices']}
         
         # Check if it's a blend request (comma separated voices)
         if ',' in voice:
@@ -173,12 +181,8 @@ def validate_voice(voice, kokoro):
                     supported_voices_list = ', '.join(sorted(supported_voices))
                     raise ValueError(f"Unsupported voice: {v}\nSupported voices are: {supported_voices_list}")
             
-            # Create the blended voice style
-            style1 = kokoro.get_voice_style(voices[0])
-            style2 = kokoro.get_voice_style(voices[1])
-            # Default to 50-50 blend
-            blend = np.add(style1 * (50/100), style2 * (50/100))
-            return blend
+            # Voice blending is not supported in the API, so we'll use the first voice
+            return voices[0]
             
         # Single voice validation
         if voice not in supported_voices:
@@ -186,8 +190,383 @@ def validate_voice(voice, kokoro):
             raise ValueError(f"Unsupported voice: {voice}\nSupported voices are: {supported_voices_list}")
         return voice
     except Exception as e:
-        print(f"Error getting supported voices: {e}")
-        sys.exit(1)
+        raise ValueError(f"Error validating voice: {str(e)}")
+
+def process_chunk_sequential(chunk: str, voice: str, speed: float, lang: str) -> tuple[list[float] | None, int | None]:
+    """Process a single chunk of text sequentially."""
+    try:
+        # Call the API to generate speech
+        result = client.predict(
+            text=chunk,
+            voice_names=[voice],
+            speed=speed,
+            api_name="/generate_speech_from_ui"
+        )
+        
+        # The API returns a tuple with the audio file path, metrics plot, and performance summary
+        audio_path = result[0]
+        
+        # Read the generated audio file
+        samples, sample_rate = sf.read(audio_path)
+        return samples, sample_rate
+    except Exception as e:
+        raise RuntimeError(f"Error processing chunk: {str(e)}")
+
+def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, lang="en-us", 
+                         stream=False, split_output=None, format="mp3", debug=False, 
+                         interactive=True, progress_callback=None):
+    global stop_spinner
+    
+    try:
+        # Validate language
+        lang = validate_language(lang)
+        
+        # Handle voice selection
+        if voice:
+            voice = validate_voice(voice)
+        else:
+            # Interactive voice selection solo si interactive=True
+            if interactive:
+                voices = list_available_voices()
+                print("\nTip: You can blend two voices by entering two numbers separated by comma (e.g., '7,11')")
+                try:
+                    voice_input = input("Choose voice(s) by number: ")
+                    if ',' in voice_input:
+                        v1, v2 = map(lambda x: int(x.strip()) - 1, voice_input.split(','))
+                        if not (0 <= v1 < len(voices) and 0 <= v2 < len(voices)):
+                            raise ValueError("Invalid voice numbers")
+                        voice = f"{voices[v1]},{voices[v2]}"
+                    else:
+                        voice_choice = int(voice_input) - 1
+                        if not (0 <= voice_choice < len(voices)):
+                            raise ValueError("Invalid choice")
+                        voice = voices[voice_choice]
+                    voice = validate_voice(voice)
+                except (ValueError, IndexError):
+                    print("Invalid choice. Using default voice.")
+                    voice = "af_sarah"  # default voice
+            else:
+                voice = "af_sarah"  # default voice cuando no es interactivo
+        
+        # Read the input file (handle .txt or .epub)
+        if input_file.endswith('.epub'):
+            chapters = extract_chapters_from_epub(input_file, debug)
+            if not chapters:
+                print("No chapters found in EPUB file.")
+                sys.exit(1)
+            
+            # Print summary before starting
+            total_words = sum(len(chapter['content'].split()) for chapter in chapters)
+            print("\nBook Summary:")
+            print(f"Total Chapters: {len(chapters)}")
+            print(f"Total Words: {total_words:,}")
+            print(f"Total Duration: {total_words / 150:.1f} minutes")
+            
+            if debug:
+                print("\nDetailed Chapter List:")
+                for chapter in chapters:
+                    word_count = len(chapter['content'].split())
+                    print(f"  • {chapter['title']}")
+                    print(f"    Words: {word_count:,}")
+                    print(f"    Duration: {word_count / 150:.1f} minutes")
+            
+            # Solo pedimos confirmación si interactive=True
+            if interactive:
+                print("\nPress Enter to start processing, or Ctrl+C to cancel...")
+                input()
+            
+            if split_output:
+                os.makedirs(split_output, exist_ok=True)
+                
+                # First create all chapter directories and info files
+                print("\nCreating chapter directories and info files...")
+                total_chapters = len(chapters)
+                for chapter_num, chapter in enumerate(chapters, 1):
+                    chapter_dir = os.path.join(split_output, f"chapter_{chapter_num:03d}")
+                    os.makedirs(chapter_dir, exist_ok=True)
+                    
+                    # Write chapter info with more details
+                    info_file = os.path.join(chapter_dir, "info.txt")
+                    with open(info_file, "w", encoding="utf-8") as f:
+                        f.write(f"Title: {chapter['title']}\n")
+                        f.write(f"Order: {chapter['order']}\n")
+                        f.write(f"Words: {len(chapter['content'].split())}\n")
+                        f.write(f"Estimated Duration: {len(chapter['content'].split()) / 150:.1f} minutes\n")
+                
+                print("Created chapter directories and info files")
+                
+                # Continue with existing processing code...
+                
+                # Llamar al callback de progreso si existe
+                if progress_callback:
+                    progress_callback(chapter_num, total_chapters)
+            
+        else:
+            with open(input_file, 'r', encoding='utf-8') as file:
+                text = file.read()
+            # Treat single text file as one chapter
+            chapters = [{'title': 'Chapter 1', 'content': text}]
+
+        if stream:
+            # Streaming is not supported with the API
+            print("Streaming is not supported when using the API")
+            sys.exit(1)
+        else:
+            if split_output:
+                os.makedirs(split_output, exist_ok=True)
+                
+                for chapter_num, chapter in enumerate(chapters, 1):
+                    chapter_dir = os.path.join(split_output, f"chapter_{chapter_num:03d}")
+                    
+                    # Skip if chapter is already fully processed
+                    if os.path.exists(chapter_dir):
+                        info_file = os.path.join(chapter_dir, "info.txt")
+                        if os.path.exists(info_file):
+                            chunks = chunk_text(chapter['content'], chunk_size=50000)
+                            total_chunks = len(chunks)
+                            existing_chunks = len([f for f in os.listdir(chapter_dir) 
+                                                if f.startswith("chunk_") and f.endswith(f".{format}")])
+                            
+                            if existing_chunks == total_chunks:
+                                print(f"\nSkipping {chapter['title']}: Already completed ({existing_chunks} chunks)")
+                                continue
+                            else:
+                                print(f"\nResuming {chapter['title']}: Found {existing_chunks}/{total_chunks} chunks")
+
+                    print(f"\nProcessing: {chapter['title']}")
+                    os.makedirs(chapter_dir, exist_ok=True)
+                    
+                    # Write chapter info if not exists
+                    info_file = os.path.join(chapter_dir, "info.txt")
+                    if not os.path.exists(info_file):
+                        with open(info_file, "w", encoding="utf-8") as f:
+                            f.write(f"Title: {chapter['title']}\n")
+                    
+                    chunks = chunk_text(chapter['content'], chunk_size=50000)
+                    total_chunks = len(chunks)
+                    processed_chunks = len([f for f in os.listdir(chapter_dir) 
+                                         if f.startswith("chunk_") and f.endswith(f".{format}")])
+                    
+                    for chunk_num, chunk in enumerate(chunks, 1):
+                        if stop_audio:  # Check for interruption
+                            break
+                        
+                        # Skip if chunk file already exists (regardless of position)
+                        chunk_file = os.path.join(chapter_dir, f"chunk_{chunk_num:03d}.{format}")
+                        if os.path.exists(chunk_file):
+                            continue  # Don't increment processed_chunks here since we counted them above
+                        
+                        # Create progress bar
+                        filled = "■" * processed_chunks
+                        remaining = "□" * (total_chunks - processed_chunks)
+                        progress_bar = f"[{filled}{remaining}] ({processed_chunks}/{total_chunks})"
+                        
+                        stop_spinner = False
+                        spinner_thread = threading.Thread(
+                            target=spinning_wheel,
+                            args=(f"Processing {chapter['title']}", progress_bar)
+                        )
+                        spinner_thread.start()
+                        
+                        try:
+                            samples, sample_rate = process_chunk_sequential(chunk, voice, speed, lang)
+                            if samples is not None:
+                                sf.write(chunk_file, samples, sample_rate)
+                                processed_chunks += 1
+                        except Exception as e:
+                            print(f"\nError processing chunk {chunk_num}: {e}")
+                        
+                        stop_spinner = True
+                        spinner_thread.join()
+                        
+                        if stop_audio:  # Check for interruption
+                            break
+                    
+                    print(f"\nCompleted {chapter['title']}: {processed_chunks}/{total_chunks} chunks processed")
+                    
+                    if stop_audio:  # Check for interruption
+                        break
+                
+                print(f"\nCreated audio files for {len(chapters)} chapters in {split_output}/")
+            else:
+                # Combine all chapters into one file
+                all_samples = []
+                sample_rate = None
+                
+                for chapter_num, chapter in enumerate(chapters, 1):
+                    print(f"\nProcessing: {chapter['title']}")
+                    chunks = chunk_text(chapter['content'], chunk_size=50000)
+                    processed_chunks = 0
+                    total_chunks = len(chunks)
+                    
+                    for chunk_num, chunk in enumerate(chunks, 1):
+                        if stop_audio:  # Check for interruption
+                            break
+                        
+                        stop_spinner = False
+                        spinner_thread = threading.Thread(
+                            target=spinning_wheel,
+                            args=(f"Processing chunk {chunk_num}/{total_chunks}",)
+                        )
+                        spinner_thread.start()
+                        
+                        try:
+                            samples, sr = process_chunk_sequential(chunk, voice, speed, lang)
+                            if samples is not None:
+                                if sample_rate is None:
+                                    sample_rate = sr
+                                all_samples.extend(samples)
+                                processed_chunks += 1
+                        except Exception as e:
+                            print(f"\nError processing chunk {chunk_num}: {e}")
+                        
+                        stop_spinner = True
+                        spinner_thread.join()
+                    
+                    print(f"\nCompleted {chapter['title']}: {processed_chunks}/{total_chunks} chunks processed")
+                
+                if all_samples:
+                    print("\nSaving complete audio file...")
+                    if not output_file:
+                        output_file = f"{os.path.splitext(input_file)[0]}.{format}"
+                    sf.write(output_file, all_samples, sample_rate)
+                    print(f"Created {output_file}")
+    except Exception as e:
+        raise RuntimeError(f"Error converting text to audio: {str(e)}")
+
+def handle_ctrl_c(signum, frame):
+    global stop_spinner, stop_audio
+    print("\nCtrl+C detected, stopping...")
+    stop_spinner = True
+    stop_audio = True
+    sys.exit(0)
+
+# Register the signal handler for SIGINT (Ctrl+C)
+signal.signal(signal.SIGINT, handle_ctrl_c)
+
+def merge_chunks_to_chapters(split_output_dir, format="mp3"):
+    """Merge audio chunks into complete chapter files."""
+    global stop_spinner
+
+    if not os.path.exists(split_output_dir):
+        print(f"Error: Directory {split_output_dir} does not exist.")
+        return
+
+    # Find all chapter directories
+    chapter_dirs = sorted([d for d in os.listdir(split_output_dir) 
+                          if d.startswith("chapter_") and os.path.isdir(os.path.join(split_output_dir, d))])
+    
+    if not chapter_dirs:
+        print(f"No chapter directories found in {split_output_dir}")
+        return
+
+    for chapter_dir in chapter_dirs:
+        chapter_path = os.path.join(split_output_dir, chapter_dir)
+        chunk_files = sorted([f for f in os.listdir(chapter_path) 
+                            if f.startswith("chunk_") and f.endswith(f".{format}")])
+        
+        if not chunk_files:
+            print(f"No chunks found in {chapter_dir}")
+            continue
+
+        # Read chapter title from info.txt if available
+        chapter_title = chapter_dir
+        info_file = os.path.join(chapter_path, "info.txt")
+        if os.path.exists(info_file):
+            with open(info_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith("Title:"):
+                        chapter_title = line.replace("Title:", "").strip()
+                        break
+
+        print(f"\nMerging chunks for {chapter_title}")
+        
+        # Initialize variables for merging
+        all_samples = []
+        sample_rate = None
+        total_duration = 0
+        
+        # Create progress spinner
+        total_chunks = len(chunk_files)
+        processed_chunks = 0
+        
+        for chunk_file in chunk_files:
+            chunk_path = os.path.join(chapter_path, chunk_file)
+            
+            # Display progress
+            print(f"\rProcessing chunk {processed_chunks + 1}/{total_chunks}", end="")
+            
+            try:
+                # Read audio data
+                data, sr = sf.read(chunk_path)
+                
+                # Verify the audio data
+                if len(data) == 0:
+                    print(f"\nWarning: Empty audio data in {chunk_file}")
+                    continue
+                
+                # Initialize sample rate or verify it matches
+                if sample_rate is None:
+                    sample_rate = sr
+                elif sr != sample_rate:
+                    print(f"\nWarning: Sample rate mismatch in {chunk_file}")
+                    continue
+                
+                # Add chunk duration to total
+                chunk_duration = len(data) / sr
+                total_duration += chunk_duration
+                
+                # Append the audio data
+                all_samples.extend(data)
+                processed_chunks += 1
+                
+            except Exception as e:
+                print(f"\nError processing {chunk_file}: {e}")
+        
+        print()  # New line after progress
+        
+        if all_samples:
+            # Create merged file name
+            merged_file = os.path.join(split_output_dir, f"{chapter_dir}.{format}")
+            print(f"Saving merged chapter to {merged_file}")
+            print(f"Total duration: {total_duration:.2f} seconds")
+            
+            try:
+                # Ensure all_samples is a numpy array
+                all_samples = np.array(all_samples)
+                
+                # Save merged audio
+                sf.write(merged_file, all_samples, sample_rate)
+                print(f"Successfully merged {processed_chunks}/{total_chunks} chunks")
+                
+                # Verify the output file
+                if os.path.exists(merged_file):
+                    output_data, output_sr = sf.read(merged_file)
+                    output_duration = len(output_data) / output_sr
+                    print(f"Verified output file: {output_duration:.2f} seconds")
+                else:
+                    print("Warning: Output file was not created")
+                
+            except Exception as e:
+                print(f"Error saving merged file: {e}")
+        else:
+            print("No valid audio data to merge")
+
+def get_valid_options():
+    """Return a set of valid command line options"""
+    return {
+        '-h', '--help',
+        '--help-languages',
+        '--help-voices',
+        '--merge-chunks',
+        '--stream',
+        '--speed',
+        '--lang',
+        '--voice',
+        '--split-output',
+        '--format',
+        '--debug'  # Add debug option
+    }
 
 def extract_chapters_from_epub(epub_file, debug=False):
     """Extract chapters from epub file using ebooklib's metadata and TOC."""
@@ -393,418 +772,6 @@ def extract_chapters_from_epub(epub_file, debug=False):
     
     return chapters
 
-def process_chunk_sequential(chunk: str, kokoro: Kokoro, voice: str | np.ndarray, speed: float, lang: str) -> tuple[list[float] | None, int | None]:
-    """Process a single chunk of text sequentially."""
-    try:
-        # If voice is already a numpy array (blended voice), pass it directly
-        if isinstance(voice, np.ndarray):
-            samples, sample_rate = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
-        else:
-            # Otherwise use it as a voice name string
-            samples, sample_rate = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
-        return samples, sample_rate
-    except Exception as e:
-        print(f"\nError processing chunk: {e}")
-        return None, None
-
-def convert_text_to_audio(input_file, output_file=None, voice=None, speed=1.0, lang="en-us", 
-                         stream=False, split_output=None, format="wav", debug=False, 
-                         interactive=True, progress_callback=None):
-    global stop_spinner
-    # Load Kokoro model
-    try:
-        kokoro = Kokoro("kokoro-v0_19.onnx", "voices.json")
-        # Validate language after loading model
-        lang = validate_language(lang, kokoro)
-        
-        # Handle voice selection
-        if voice:
-            voice = validate_voice(voice, kokoro)
-        else:
-            # Interactive voice selection solo si interactive=True
-            if interactive:
-                voices = list_available_voices(kokoro)
-                print("\nTip: You can blend two voices by entering two numbers separated by comma (e.g., '7,11')")
-                try:
-                    voice_input = input("Choose voice(s) by number: ")
-                    if ',' in voice_input:
-                        v1, v2 = map(lambda x: int(x.strip()) - 1, voice_input.split(','))
-                        if not (0 <= v1 < len(voices) and 0 <= v2 < len(voices)):
-                            raise ValueError("Invalid voice numbers")
-                        voice = f"{voices[v1]},{voices[v2]}"
-                    else:
-                        voice_choice = int(voice_input) - 1
-                        if not (0 <= voice_choice < len(voices)):
-                            raise ValueError("Invalid choice")
-                        voice = voices[voice_choice]
-                    voice = validate_voice(voice, kokoro)
-                except (ValueError, IndexError):
-                    print("Invalid choice. Using default voice.")
-                    voice = "af_sarah"  # default voice
-            else:
-                voice = "af_sarah"  # default voice cuando no es interactivo
-    
-    except ValueError as e:
-        print(f"Error: {e}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error loading Kokoro model: {e}")
-        sys.exit(1)
-    
-    # Read the input file (handle .txt or .epub)
-    if input_file.endswith('.epub'):
-        chapters = extract_chapters_from_epub(input_file, debug)
-        if not chapters:
-            print("No chapters found in EPUB file.")
-            sys.exit(1)
-            
-        # Print summary before starting
-        total_words = sum(len(chapter['content'].split()) for chapter in chapters)
-        print("\nBook Summary:")
-        print(f"Total Chapters: {len(chapters)}")
-        print(f"Total Words: {total_words:,}")
-        print(f"Total Duration: {total_words / 150:.1f} minutes")
-        
-        if debug:
-            print("\nDetailed Chapter List:")
-            for chapter in chapters:
-                word_count = len(chapter['content'].split())
-                print(f"  • {chapter['title']}")
-                print(f"    Words: {word_count:,}")
-                print(f"    Duration: {word_count / 150:.1f} minutes")
-        
-        # Solo pedimos confirmación si interactive=True
-        if interactive:
-            print("\nPress Enter to start processing, or Ctrl+C to cancel...")
-            input()
-        
-        if split_output:
-            os.makedirs(split_output, exist_ok=True)
-            
-            # First create all chapter directories and info files
-            print("\nCreating chapter directories and info files...")
-            total_chapters = len(chapters)
-            for chapter_num, chapter in enumerate(chapters, 1):
-                chapter_dir = os.path.join(split_output, f"chapter_{chapter_num:03d}")
-                os.makedirs(chapter_dir, exist_ok=True)
-                
-                # Write chapter info with more details
-                info_file = os.path.join(chapter_dir, "info.txt")
-                with open(info_file, "w", encoding="utf-8") as f:
-                    f.write(f"Title: {chapter['title']}\n")
-                    f.write(f"Order: {chapter['order']}\n")
-                    f.write(f"Words: {len(chapter['content'].split())}\n")
-                    f.write(f"Estimated Duration: {len(chapter['content'].split()) / 150:.1f} minutes\n")
-            
-            print("Created chapter directories and info files")
-            
-            # Continue with existing processing code...
-            
-            # Llamar al callback de progreso si existe
-            if progress_callback:
-                progress_callback(chapter_num, total_chapters)
-            
-    else:
-        with open(input_file, 'r', encoding='utf-8') as file:
-            text = file.read()
-        # Treat single text file as one chapter
-        chapters = [{'title': 'Chapter 1', 'content': text}]
-
-    if stream:
-        import asyncio
-        # Stream each chapter
-        for chapter in chapters:
-            print(f"\nStreaming: {chapter['title']}")
-            asyncio.run(stream_audio(kokoro, chapter['content'], voice, speed, lang))
-    else:
-        if split_output:
-            os.makedirs(split_output, exist_ok=True)
-            
-            for chapter_num, chapter in enumerate(chapters, 1):
-                chapter_dir = os.path.join(split_output, f"chapter_{chapter_num:03d}")
-                
-                # Skip if chapter is already fully processed
-                if os.path.exists(chapter_dir):
-                    info_file = os.path.join(chapter_dir, "info.txt")
-                    if os.path.exists(info_file):
-                        chunks = chunk_text(chapter['content'], chunk_size=2000)
-                        total_chunks = len(chunks)
-                        existing_chunks = len([f for f in os.listdir(chapter_dir) 
-                                            if f.startswith("chunk_") and f.endswith(f".{format}")])
-                        
-                        if existing_chunks == total_chunks:
-                            print(f"\nSkipping {chapter['title']}: Already completed ({existing_chunks} chunks)")
-                            continue
-                        else:
-                            print(f"\nResuming {chapter['title']}: Found {existing_chunks}/{total_chunks} chunks")
-
-                print(f"\nProcessing: {chapter['title']}")
-                os.makedirs(chapter_dir, exist_ok=True)
-                
-                # Write chapter info if not exists
-                info_file = os.path.join(chapter_dir, "info.txt")
-                if not os.path.exists(info_file):
-                    with open(info_file, "w", encoding="utf-8") as f:
-                        f.write(f"Title: {chapter['title']}\n")
-                
-                chunks = chunk_text(chapter['content'], chunk_size=2000)
-                total_chunks = len(chunks)
-                processed_chunks = len([f for f in os.listdir(chapter_dir) 
-                                     if f.startswith("chunk_") and f.endswith(f".{format}")])
-                
-                for chunk_num, chunk in enumerate(chunks, 1):
-                    if stop_audio:  # Check for interruption
-                        break
-                    
-                    # Skip if chunk file already exists (regardless of position)
-                    chunk_file = os.path.join(chapter_dir, f"chunk_{chunk_num:03d}.{format}")
-                    if os.path.exists(chunk_file):
-                        continue  # Don't increment processed_chunks here since we counted them above
-                    
-                    # Create progress bar
-                    filled = "■" * processed_chunks
-                    remaining = "□" * (total_chunks - processed_chunks)
-                    progress_bar = f"[{filled}{remaining}] ({processed_chunks}/{total_chunks})"
-                    
-                    stop_spinner = False
-                    spinner_thread = threading.Thread(
-                        target=spinning_wheel,
-                        args=(f"Processing {chapter['title']}", progress_bar)
-                    )
-                    spinner_thread.start()
-                    
-                    try:
-                        samples, sample_rate = process_chunk_sequential(chunk, kokoro, voice, speed, lang)
-                        if samples is not None:
-                            sf.write(chunk_file, samples, sample_rate)
-                            processed_chunks += 1
-                    except Exception as e:
-                        print(f"\nError processing chunk {chunk_num}: {e}")
-                    
-                    stop_spinner = True
-                    spinner_thread.join()
-                    
-                    if stop_audio:  # Check for interruption
-                        break
-                
-                print(f"\nCompleted {chapter['title']}: {processed_chunks}/{total_chunks} chunks processed")
-                
-                if stop_audio:  # Check for interruption
-                    break
-            
-            print(f"\nCreated audio files for {len(chapters)} chapters in {split_output}/")
-        else:
-            # Combine all chapters into one file
-            all_samples = []
-            sample_rate = None
-            
-            for chapter_num, chapter in enumerate(chapters, 1):
-                print(f"\nProcessing: {chapter['title']}")
-                chunks = chunk_text(chapter['content'], chunk_size=2000)
-                processed_chunks = 0
-                total_chunks = len(chunks)
-                
-                for chunk_num, chunk in enumerate(chunks, 1):
-                    if stop_audio:  # Check for interruption
-                        break
-                    
-                    stop_spinner = False
-                    spinner_thread = threading.Thread(
-                        target=spinning_wheel,
-                        args=(f"Processing chunk {chunk_num}/{total_chunks}",)
-                    )
-                    spinner_thread.start()
-                    
-                    try:
-                        samples, sr = process_chunk_sequential(chunk, kokoro, voice, speed, lang)
-                        if samples is not None:
-                            if sample_rate is None:
-                                sample_rate = sr
-                            all_samples.extend(samples)
-                            processed_chunks += 1
-                    except Exception as e:
-                        print(f"\nError processing chunk {chunk_num}: {e}")
-                    
-                    stop_spinner = True
-                    spinner_thread.join()
-                
-                print(f"\nCompleted {chapter['title']}: {processed_chunks}/{total_chunks} chunks processed")
-            
-            if all_samples:
-                print("\nSaving complete audio file...")
-                if not output_file:
-                    output_file = f"{os.path.splitext(input_file)[0]}.{format}"
-                sf.write(output_file, all_samples, sample_rate)
-                print(f"Created {output_file}")
-
-async def stream_audio(kokoro, text, voice, speed, lang):
-    global stop_spinner, stop_audio
-    stop_spinner = False
-    stop_audio = False
-    
-    print("Starting audio stream...")
-    chunks = chunk_text(text)
-    
-    for i, chunk in enumerate(chunks, 1):
-        if stop_audio:
-            break
-        # Update progress percentage
-        progress = int((i / len(chunks)) * 100)
-        spinner_thread = threading.Thread(
-            target=spinning_wheel, 
-            args=(f"Streaming chunk {i}/{len(chunks)}",)
-        )
-        spinner_thread.start()
-        
-        async for samples, sample_rate in kokoro.create_stream(
-            chunk, voice=voice, speed=speed, lang=lang
-        ):
-            if stop_audio:
-                break
-            sd.play(samples, sample_rate)
-            sd.wait()
-        
-        stop_spinner = True
-        spinner_thread.join()
-        stop_spinner = False
-    
-    print("\nStreaming completed.")
-
-def handle_ctrl_c(signum, frame):
-    global stop_spinner, stop_audio
-    print("\nCtrl+C detected, stopping...")
-    stop_spinner = True
-    stop_audio = True
-    sys.exit(0)
-
-# Register the signal handler for SIGINT (Ctrl+C)
-signal.signal(signal.SIGINT, handle_ctrl_c)
-
-def merge_chunks_to_chapters(split_output_dir, format="wav"):
-    """Merge audio chunks into complete chapter files."""
-    global stop_spinner
-
-    if not os.path.exists(split_output_dir):
-        print(f"Error: Directory {split_output_dir} does not exist.")
-        return
-
-    # Find all chapter directories
-    chapter_dirs = sorted([d for d in os.listdir(split_output_dir) 
-                          if d.startswith("chapter_") and os.path.isdir(os.path.join(split_output_dir, d))])
-    
-    if not chapter_dirs:
-        print(f"No chapter directories found in {split_output_dir}")
-        return
-
-    for chapter_dir in chapter_dirs:
-        chapter_path = os.path.join(split_output_dir, chapter_dir)
-        chunk_files = sorted([f for f in os.listdir(chapter_path) 
-                            if f.startswith("chunk_") and f.endswith(f".{format}")])
-        
-        if not chunk_files:
-            print(f"No chunks found in {chapter_dir}")
-            continue
-
-        # Read chapter title from info.txt if available
-        chapter_title = chapter_dir
-        info_file = os.path.join(chapter_path, "info.txt")
-        if os.path.exists(info_file):
-            with open(info_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.startswith("Title:"):
-                        chapter_title = line.replace("Title:", "").strip()
-                        break
-
-        print(f"\nMerging chunks for {chapter_title}")
-        
-        # Initialize variables for merging
-        all_samples = []
-        sample_rate = None
-        total_duration = 0
-        
-        # Create progress spinner
-        total_chunks = len(chunk_files)
-        processed_chunks = 0
-        
-        for chunk_file in chunk_files:
-            chunk_path = os.path.join(chapter_path, chunk_file)
-            
-            # Display progress
-            print(f"\rProcessing chunk {processed_chunks + 1}/{total_chunks}", end="")
-            
-            try:
-                # Read audio data
-                data, sr = sf.read(chunk_path)
-                
-                # Verify the audio data
-                if len(data) == 0:
-                    print(f"\nWarning: Empty audio data in {chunk_file}")
-                    continue
-                
-                # Initialize sample rate or verify it matches
-                if sample_rate is None:
-                    sample_rate = sr
-                elif sr != sample_rate:
-                    print(f"\nWarning: Sample rate mismatch in {chunk_file}")
-                    continue
-                
-                # Add chunk duration to total
-                chunk_duration = len(data) / sr
-                total_duration += chunk_duration
-                
-                # Append the audio data
-                all_samples.extend(data)
-                processed_chunks += 1
-                
-            except Exception as e:
-                print(f"\nError processing {chunk_file}: {e}")
-        
-        print()  # New line after progress
-        
-        if all_samples:
-            # Create merged file name
-            merged_file = os.path.join(split_output_dir, f"{chapter_dir}.{format}")
-            print(f"Saving merged chapter to {merged_file}")
-            print(f"Total duration: {total_duration:.2f} seconds")
-            
-            try:
-                # Ensure all_samples is a numpy array
-                import numpy as np
-                all_samples = np.array(all_samples)
-                
-                # Save merged audio
-                sf.write(merged_file, all_samples, sample_rate)
-                print(f"Successfully merged {processed_chunks}/{total_chunks} chunks")
-                
-                # Verify the output file
-                if os.path.exists(merged_file):
-                    output_data, output_sr = sf.read(merged_file)
-                    output_duration = len(output_data) / output_sr
-                    print(f"Verified output file: {output_duration:.2f} seconds")
-                else:
-                    print("Warning: Output file was not created")
-                
-            except Exception as e:
-                print(f"Error saving merged file: {e}")
-        else:
-            print("No valid audio data to merge")
-
-def get_valid_options():
-    """Return a set of valid command line options"""
-    return {
-        '-h', '--help',
-        '--help-languages',
-        '--help-voices',
-        '--merge-chunks',
-        '--stream',
-        '--speed',
-        '--lang',
-        '--voice',
-        '--split-output',
-        '--format',
-        '--debug'  # Add debug option
-    }
-
 if __name__ == "__main__":
     # Validate command line options first
     valid_options = get_valid_options()
@@ -861,7 +828,7 @@ if __name__ == "__main__":
     lang = "en-us"  # default language
     voice = None  # default to interactive selection
     split_output = None
-    format = "wav"  # default format
+    format = "mp3"  # default format
     merge_chunks = '--merge-chunks' in sys.argv
     
     # Parse optional arguments
