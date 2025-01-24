@@ -772,6 +772,37 @@ def extract_chapters_from_epub(epub_file, debug=False):
     
     return chapters
 
+def calculate_book_summary(epub_file):
+    """Calculate book summary from EPUB file."""
+    chapters = extract_chapters_from_epub(epub_file, debug=False)
+    
+    if not chapters:
+        return {
+            "success": False,
+            "error": "No chapters were extracted from the EPUB file"
+        }
+    
+    # Calculate summary
+    total_words = sum(len(chapter['content'].split()) for chapter in chapters)
+    
+    # Create chapter list with details
+    chapter_list = [{
+        "order": chapter['order'],
+        "title": chapter['title'],
+        "word_count": len(chapter['content'].split()),
+        "estimated_duration": len(chapter['content'].split()) / 150  # minutes
+    } for chapter in chapters]
+    
+    return {
+        "success": True,
+        "summary": {
+            "total_chapters": len(chapters),
+            "total_words": total_words,
+            "total_duration": total_words / 150  # minutes
+        },
+        "chapters": chapter_list
+    }
+
 if __name__ == "__main__":
     # Validate command line options first
     valid_options = get_valid_options()

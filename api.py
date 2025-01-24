@@ -15,7 +15,8 @@ from gradio_client import Client
 # Import Kokoro processing functions
 from kokoro_tts import (
     convert_text_to_audio,
-    validate_voice
+    validate_voice,
+    calculate_book_summary
 )
 
 # Configure logging
@@ -298,4 +299,59 @@ async def list_languages():
     # Since we don't have direct access to supported languages through the API,
     # we'll maintain a list of known supported languages
     languages = ["en-us", "es-es", "fr-fr", "de-de", "it-it", "pt-br", "ja-jp"]
-    return {"languages": languages} 
+    return {"languages": languages}
+
+@app.post("/book-summary")
+async def get_book_summary(file: UploadFile = File(...)):
+    """Calculate book summary from EPUB file"""
+    try:
+        # Log received file
+        logger.info(f"Received request for book summary - File: {file.filename}")
+        
+        # Validate file type
+        if not file.filename.endswith('.epub'):
+            raise HTTPException(
+                status_code=400,
+                detail={"type": "value_error", "loc": ["file"], "msg": "Only EPUB files are supported"}
+            )
+        
+        # Generate temporary ID for the file
+        temp_id = str(uuid.uuid4())
+        
+        # Save uploaded file temporarily
+        epub_path = os.path.join(UPLOAD_DIR, f"{temp_id}.epub")
+        try:
+            with open(epub_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail={"type": "upload_error", "msg": f"Error saving uploaded file: {str(e)}"}
+            )
+        
+        try:
+            # Calculate book summary
+            result = calculate_book_summary(epub_path)
+            
+            if not result["success"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"type": "processing_error", "msg": result["error"]}
+                )
+                
+            return result
+            
+        finally:
+            # Clean up - remove temporary file
+            if os.path.exists(epub_path):
+                os.remove(epub_path)
+                logger.info(f"Removed temporary file: {epub_path}")
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_book_summary: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={"type": "server_error", "msg": str(e)}
+        ) 
