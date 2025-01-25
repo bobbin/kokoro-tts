@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api.py"
+    }
+  ],
+  "env": {
+    "PYTHONPATH": ".",
+    "POSTGRES_POOLING": "true"
+  },
+  "functions": {
+    "api.py": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  }
+} 
