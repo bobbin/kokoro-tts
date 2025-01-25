@@ -1,22 +1,215 @@
-# Kokoro TTS
+# Kokoro TTS API
 
-A command-line text-to-speech tool using the Kokoro ONNX model, supporting multiple languages, voices, and various input formats including EPUB books.
+API for converting EPUB books to audio using Kokoro TTS.
 
 ## Features
 
-- Multiple language and voice support
-- EPUB and TXT file input support
-- Streaming audio playback
-- Split output into chapters
-- Adjustable speech speed
-- WAV and MP3 output formats
-- Chapter merging capability
-- Detailed debug output option
+- EPUB to audio conversion
+- Multiple voices and languages support
+- Secure payment processing with Stripe
+- Admin dashboard for transaction management
+- Email notifications
+- Progress tracking
+- Chunked audio processing
+
+## Environment Setup
+
+Create a `.env` file in the root directory with the following variables:
+
+```env
+# Brevo (Email)
+BREVO_API_KEY=your_brevo_api_key
+
+# Hugging Face
+HUGGING_FACE_TOKEN=your_huggingface_token
+
+# API Configuration
+API_BASE_URL=http://localhost:8000
+
+# Stripe Configuration
+STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key
+STRIPE_WEBHOOK_SECRET=whsec_your_stripe_webhook_secret
+
+# Admin Configuration
+ADMIN_API_KEY=your_secure_admin_api_key
+```
+
+## Payment System
+
+The API uses Stripe for secure payment processing. The payment flow is as follows:
+
+1. Upload EPUB and get price:
+```bash
+POST /book-summary
+Content-Type: multipart/form-data
+file: your_book.epub
+
+Response:
+{
+  "success": true,
+  "summary": {
+    "total_chapters": 10,
+    "total_words": 50000,
+    "total_duration": 333.33,
+    "price": 6.47
+  },
+  "chapters": [...]
+}
+```
+
+2. Create payment intent:
+```bash
+POST /create-payment-intent
+Content-Type: application/json
+{
+  "job_id": "your_job_id",
+  "email": "user@example.com"
+}
+
+Response:
+{
+  "clientSecret": "pi_..._secret_...",
+  "amount": 647,
+  "transaction_id": "..."
+}
+```
+
+3. Process payment in frontend:
+```javascript
+// Using Stripe Elements
+const {error} = await stripe.confirmPayment({
+  clientSecret,
+  elements
+});
+```
+
+4. Webhook notification:
+- Configure your Stripe webhook to point to `/webhook`
+- The API will automatically start processing the book after successful payment
+
+## Admin Dashboard
+
+Secure admin endpoints for managing transactions:
+
+### List Transactions
+
+```bash
+GET /admin/transactions
+X-Admin-API-Key: your_admin_api_key
+
+# Optional status filter
+GET /admin/transactions?status=completed
+```
+
+### Transaction Details
+
+```bash
+GET /admin/transaction/{transaction_id}
+X-Admin-API-Key: your_admin_api_key
+
+Response:
+{
+  "transaction": {
+    "transaction_id": "...",
+    "stripe_payment_intent_id": "...",
+    "user_email": "...",
+    "amount": 6.47,
+    "status": "completed",
+    "created_at": "2024-...",
+    "epub_title": "...",
+    "word_count": 50000
+  },
+  "stripe_details": {...},
+  "job": {...}
+}
+```
+
+### Process Refund
+
+```bash
+POST /admin/refund/{transaction_id}
+X-Admin-API-Key: your_admin_api_key
+
+Response:
+{
+  "status": "success",
+  "refund": {...}
+}
+```
+
+## Pricing
+
+The pricing is calculated based on word count:
+
+- Up to 10,000 words: $3.00
+- Between 10,001 and 100,000 words: Proportional from $3.00 to $9.95
+- Over 100,000 words: $9.95 + $0.10 per additional 1,000 words
+
+## Security Features
+
+- Price verification before payment processing
+- Secure webhook handling with signature verification
+- Admin API key authentication
+- Database transaction safety
+- Automatic cleanup of temporary files
+- Email notifications for important events
+
+## Error Handling
+
+The API uses standard HTTP status codes and returns detailed error messages:
+
+```json
+{
+  "detail": {
+    "type": "value_error",
+    "msg": "Error description"
+  }
+}
+```
+
+Common error types:
+- `value_error`: Invalid input data
+- `upload_error`: File upload issues
+- `processing_error`: EPUB processing problems
+- `payment_error`: Payment-related issues
+
+## Development
+
+1. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+2. Set up environment variables in `.env`
+
+3. Run the server:
+```bash
+uvicorn api:app --reload
+```
+
+4. Configure Stripe webhook:
+```bash
+stripe listen --forward-to localhost:8000/webhook
+```
+
+## Production Considerations
+
+1. Use proper SSL/TLS certificates
+2. Set up proper CORS configuration
+3. Use production Stripe keys
+4. Configure proper database connection pooling
+5. Set up monitoring and logging
+6. Use secure admin API keys
+7. Configure proper email templates
+8. Set up backup systems for audio files
 
 ## Prerequisites
 
 - Python 3.x
 - Required Python packages:
+  - fastapi
+  - uvicorn
+  - python-multipart
   - soundfile
   - sounddevice
   - kokoro_onnx
@@ -27,15 +220,14 @@ A command-line text-to-speech tool using the Kokoro ONNX model, supporting multi
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/nazdridoy/kokoro-tts.git
-cd kokoro-tts
+git clone https://github.com/yourusername/kokoro-tts-api.git
+cd kokoro-tts-api
 ```
 
 2. Install required packages:
 ```bash
-pip install soundfile sounddevice kokoro_onnx ebooklib beautifulsoup4
+pip install fastapi uvicorn python-multipart soundfile sounddevice kokoro_onnx ebooklib beautifulsoup4
 ```
-Note: You can also use `uv` as a faster alternative to pip for package installation. (This is a uv project)
 
 3. Download the required model files:
 ```bash
@@ -43,95 +235,114 @@ wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/v
 wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/kokoro-v0_19.onnx
 ```
 
-## Usage
+## Running the API
 
-Basic usage:
+Start the API server:
 ```bash
-./kokoro-tts <input_text_file> [<output_audio_file>] [options]
+uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-### Commands
+The API documentation will be available at:
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
 
-- `-h, --help`: Show help message
-- `--help-languages`: List supported languages
-- `--help-voices`: List available voices
-- `--merge-chunks`: Merge existing chunks into chapter files
+## API Endpoints
 
-### Options
+### POST /convert
+Convert EPUB file to audio
 
-- `--stream`: Stream audio instead of saving to file
-- `--speed <float>`: Set speech speed (default: 1.0)
-- `--lang <str>`: Set language (default: en-us)
-- `--voice <str>`: Set voice (default: interactive selection)
-- `--split-output <dir>`: Save each chunk as separate file in directory
-- `--format <str>`: Audio format: wav or mp3 (default: wav)
-- `--debug`: Show detailed debug information during processing
+**Parameters:**
+- `file`: EPUB file (multipart/form-data)
+- `voice`: Voice ID (string)
+- `speed`: Speech speed (float, default: 1.0)
+- `lang`: Language code (string, default: "en-us")
 
-### Input Formats
+**Response:**
+```json
+{
+    "job_id": "uuid",
+    "message": "Conversion started"
+}
+```
 
-- `.txt`: Text file input
-- `.epub`: EPUB book input (will process chapters)
+### GET /status/{job_id}
+Get conversion job status
 
-### Examples
+**Response:**
+```json
+{
+    "job_id": "uuid",
+    "status": "queued|processing|completed|failed",
+    "progress": 45.5,
+    "output_file": "path/to/output.mp3",
+    "error": "error message if failed"
+}
+```
 
+### GET /voices
+Get list of available voices
+
+**Response:**
+```json
+{
+    "voices": ["voice1", "voice2", ...]
+}
+```
+
+### GET /languages
+Get list of supported languages
+
+**Response:**
+```json
+{
+    "languages": ["en-us", "es-es", ...]
+}
+```
+
+## Example Usage
+
+Using curl:
 ```bash
-# Basic usage with output file
-kokoro-tts input.txt output.wav --speed 1.2 --lang en-us --voice af_sarah
+# Convert EPUB to audio
+curl -X POST "http://localhost:8000/convert" \
+     -H "accept: application/json" \
+     -H "Content-Type: multipart/form-data" \
+     -F "file=@book.epub" \
+     -F "voice=af_sarah" \
+     -F "speed=1.0" \
+     -F "lang=en-us"
 
-# Process EPUB and split into chunks
-kokoro-tts input.epub --split-output ./chunks/ --format mp3
-
-# Stream audio directly
-kokoro-tts input.txt --stream --speed 0.8
-
-# Merge existing chunks
-kokoro-tts --merge-chunks --split-output ./chunks/ --format wav
-
-# Process EPUB with detailed debug output
-kokoro-tts input.epub --split-output ./chunks/ --debug
+# Check conversion status
+curl "http://localhost:8000/status/job-id-here"
 
 # List available voices
-kokoro-tts --help-voices
+curl "http://localhost:8000/voices"
 
 # List supported languages
-kokoro-tts --help-languages
+curl "http://localhost:8000/languages"
 ```
 
-## Features in Detail
+Using Python requests:
+```python
+import requests
 
-### EPUB Processing
-- Automatically extracts chapters from EPUB files
-- Preserves chapter titles and structure
-- Creates organized output for each chapter
-- Detailed debug output available for troubleshooting
+# Convert EPUB to audio
+files = {'file': open('book.epub', 'rb')}
+data = {'voice': 'af_sarah', 'speed': 1.0, 'lang': 'en-us'}
+response = requests.post('http://localhost:8000/convert', files=files, data=data)
+job_id = response.json()['job_id']
 
-### Audio Processing
-- Chunks long text into manageable segments
-- Supports streaming for immediate playback
-- Progress indicators for long processes
-- Handles interruptions gracefully
+# Check conversion status
+status = requests.get(f'http://localhost:8000/status/{job_id}')
+print(status.json())
+```
 
-### Output Options
-- Single file output
-- Split output with chapter organization
-- Chunk merging capability
-- Multiple audio format support
+## Directory Structure
 
-### Debug Mode
-- Shows detailed information about file processing
-- Displays NCX parsing details for EPUB files
-- Lists all found chapters and their metadata
-- Helps troubleshoot processing issues
-
-## Contributing
-
-This is a project for personal use. But if you want to contribute, please feel free to submit a Pull Request.
+- `/uploads`: Temporary storage for uploaded EPUB files
+- `/processing`: Temporary directory for processing files
+- `/outputs`: Directory containing generated MP3 files
 
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Kokoro ONNX model developers
-- Contributors to the dependent libraries

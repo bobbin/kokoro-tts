@@ -1,0 +1,17 @@
+fastapi==0.109.2
+uvicorn==0.27.1
+python-multipart==0.0.9
+soundfile==0.12.1
+sounddevice==0.4.6
+ebooklib==0.18
+beautifulsoup4==4.12.3
+stripe==7.14.0
+python-dotenv==1.0.1
+sqlalchemy==2.0.27
+psycopg2-binary==2.9.9
+tenacity==8.2.3
+gradio-client==0.10.1
+sib-api-v3-sdk==7.6.0
+numpy==1.26.4
+pydantic==2.6.1
+email-validator==2.1.0.post1
