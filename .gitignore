@@ -21,3 +21,4 @@ kokoro-v0_19.onnx
 /chunks/
 /processing/
 /uploads/
+.env
