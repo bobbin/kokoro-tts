@@ -1,10 +1,12 @@
-from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks, Form, File
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks, Form, File, Depends, Header, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
+import stripe
 import shutil
 import os
 import uuid
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel, EmailStr
 import logging
 from datetime import datetime
@@ -13,9 +15,9 @@ import asyncio
 from gradio_client import Client
 import sib_api_v3_sdk
 from sib_api_v3_sdk import Configuration, ApiClient, TransactionalEmailsApi, SendSmtpEmail
-from sqlalchemy import create_engine, Column, String, Float, DateTime, Text
+from sqlalchemy import create_engine, Column, String, Float, DateTime, Text, Boolean, Integer, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.pool import QueuePool
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -23,6 +25,27 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Stripe configuration
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
+
+if not all([STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, ADMIN_API_KEY]):
+    raise ValueError("Missing required environment variables for Stripe/Admin configuration")
+
+stripe.api_key = STRIPE_SECRET_KEY
+
+# Admin API key security
+api_key_header = APIKeyHeader(name="X-Admin-API-Key")
+
+async def verify_admin_api_key(api_key: str = Depends(api_key_header)):
+    if api_key != ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API Key"
+        )
+    return api_key
 
 # Import Kokoro processing functions
 from kokoro_tts import (
@@ -120,6 +143,23 @@ class Job(Base):
     language = Column(String)
     output_file = Column(String)
     error = Column(Text)
+    transaction_id = Column(UUID(as_uuid=True), ForeignKey('transactions.transaction_id'), nullable=True)
+    transaction = relationship("Transaction", back_populates="job")
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+
+    transaction_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    stripe_payment_intent_id = Column(String, unique=True)
+    user_email = Column(String, nullable=False)
+    amount = Column(Float, nullable=False)  # Amount in USD
+    status = Column(String, nullable=False)  # pending, completed, failed, refunded
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    epub_title = Column(String)
+    word_count = Column(Integer)
+    error = Column(Text)
+    job = relationship("Job", back_populates="transaction", uselist=False)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -547,4 +587,226 @@ async def get_book_summary(file: UploadFile = File(...)):
         raise HTTPException(
             status_code=500,
             detail={"type": "server_error", "msg": str(e)}
-        ) 
+        )
+
+class PaymentIntentRequest(BaseModel):
+    job_id: str
+    email: EmailStr
+
+class AdminTransactionResponse(BaseModel):
+    transaction_id: str
+    stripe_payment_intent_id: str
+    user_email: str
+    amount: float
+    status: str
+    created_at: datetime
+    epub_title: str
+    word_count: int
+    error: Optional[str]
+
+@app.post("/create-payment-intent")
+async def create_payment_intent(request: PaymentIntentRequest):
+    """Create a Stripe PaymentIntent for a book conversion job"""
+    try:
+        db = get_db_with_retry()
+        
+        # Get job details
+        job = db.query(Job).filter(Job.job_id == request.job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        # Verify email matches
+        if job.user_email != request.email:
+            raise HTTPException(status_code=403, detail="Email does not match job")
+        
+        # Re-calculate price to prevent manipulation
+        epub_path = os.path.join(UPLOAD_DIR, f"{job.job_id}.epub")
+        if not os.path.exists(epub_path):
+            raise HTTPException(status_code=404, detail="EPUB file not found")
+        
+        summary = calculate_book_summary(epub_path)
+        if not summary["success"]:
+            raise HTTPException(status_code=400, detail="Could not calculate book price")
+        
+        amount = int(summary["summary"]["price"] * 100)  # Convert to cents for Stripe
+        
+        # Create Stripe PaymentIntent
+        try:
+            intent = stripe.PaymentIntent.create(
+                amount=amount,
+                currency="usd",
+                metadata={
+                    "job_id": str(job.job_id),
+                    "email": request.email,
+                    "epub_title": job.epub_title,
+                    "word_count": summary["summary"]["total_words"]
+                }
+            )
+            
+            # Create transaction record
+            transaction = Transaction(
+                transaction_id=uuid.uuid4(),
+                stripe_payment_intent_id=intent.id,
+                user_email=request.email,
+                amount=amount / 100,  # Store in dollars
+                status="pending",
+                epub_title=job.epub_title,
+                word_count=summary["summary"]["total_words"]
+            )
+            db.add(transaction)
+            
+            # Link transaction to job
+            job.transaction_id = transaction.transaction_id
+            db.commit()
+            
+            return {
+                "clientSecret": intent.client_secret,
+                "amount": amount,
+                "transaction_id": str(transaction.transaction_id)
+            }
+            
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+            
+    finally:
+        if 'db' in locals():
+            db.close()
+
+@app.post("/webhook")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events"""
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    
+    if event["type"] == "payment_intent.succeeded":
+        payment_intent = event["data"]["object"]
+        
+        try:
+            db = get_db_with_retry()
+            
+            # Update transaction status
+            transaction = db.query(Transaction).filter(
+                Transaction.stripe_payment_intent_id == payment_intent.id
+            ).first()
+            
+            if transaction:
+                transaction.status = "completed"
+                
+                # Get associated job
+                job = transaction.job
+                if job:
+                    # Start processing in background
+                    background_tasks = BackgroundTasks()
+                    epub_path = os.path.join(UPLOAD_DIR, f"{job.job_id}.epub")
+                    
+                    background_tasks.add_task(
+                        process_epub,
+                        str(job.job_id),
+                        epub_path,
+                        job.voice,
+                        job.speed,
+                        job.language,
+                        job.user_email
+                    )
+                
+                db.commit()
+                
+        finally:
+            if 'db' in locals():
+                db.close()
+    
+    return {"status": "success"}
+
+# Admin Dashboard Endpoints
+@app.get("/admin/transactions", response_model=List[AdminTransactionResponse])
+async def get_transactions(
+    status: Optional[str] = None,
+    api_key: str = Depends(verify_admin_api_key)
+):
+    """Get all transactions with optional status filter"""
+    try:
+        db = get_db_with_retry()
+        query = db.query(Transaction)
+        
+        if status:
+            query = query.filter(Transaction.status == status)
+        
+        transactions = query.order_by(Transaction.created_at.desc()).all()
+        return transactions
+    finally:
+        if 'db' in locals():
+            db.close()
+
+@app.get("/admin/transaction/{transaction_id}")
+async def get_transaction(
+    transaction_id: str,
+    api_key: str = Depends(verify_admin_api_key)
+):
+    """Get detailed information about a specific transaction"""
+    try:
+        db = get_db_with_retry()
+        transaction = db.query(Transaction).filter(
+            Transaction.transaction_id == transaction_id
+        ).first()
+        
+        if not transaction:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        
+        # Get Stripe payment details
+        try:
+            payment_intent = stripe.PaymentIntent.retrieve(transaction.stripe_payment_intent_id)
+        except stripe.error.StripeError:
+            payment_intent = None
+        
+        return {
+            "transaction": transaction,
+            "stripe_details": payment_intent,
+            "job": transaction.job
+        }
+    finally:
+        if 'db' in locals():
+            db.close()
+
+@app.post("/admin/refund/{transaction_id}")
+async def refund_transaction(
+    transaction_id: str,
+    api_key: str = Depends(verify_admin_api_key)
+):
+    """Refund a transaction"""
+    try:
+        db = get_db_with_retry()
+        transaction = db.query(Transaction).filter(
+            Transaction.transaction_id == transaction_id
+        ).first()
+        
+        if not transaction:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        
+        if transaction.status != "completed":
+            raise HTTPException(status_code=400, detail="Transaction cannot be refunded")
+        
+        try:
+            refund = stripe.Refund.create(
+                payment_intent=transaction.stripe_payment_intent_id
+            )
+            
+            transaction.status = "refunded"
+            db.commit()
+            
+            return {"status": "success", "refund": refund}
+            
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+            
+    finally:
+        if 'db' in locals():
+            db.close() 

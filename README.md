@@ -1,15 +1,207 @@
 # Kokoro TTS API
 
-A REST API service for converting EPUB books to audio using the Kokoro TTS engine.
+API for converting EPUB books to audio using Kokoro TTS.
 
 ## Features
 
-- EPUB to MP3 conversion
-- Multiple language and voice support
-- Background processing with status tracking
-- RESTful API endpoints
-- Progress monitoring
-- Detailed error reporting
+- EPUB to audio conversion
+- Multiple voices and languages support
+- Secure payment processing with Stripe
+- Admin dashboard for transaction management
+- Email notifications
+- Progress tracking
+- Chunked audio processing
+
+## Environment Setup
+
+Create a `.env` file in the root directory with the following variables:
+
+```env
+# Brevo (Email)
+BREVO_API_KEY=your_brevo_api_key
+
+# Hugging Face
+HUGGING_FACE_TOKEN=your_huggingface_token
+
+# API Configuration
+API_BASE_URL=http://localhost:8000
+
+# Stripe Configuration
+STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key
+STRIPE_WEBHOOK_SECRET=whsec_your_stripe_webhook_secret
+
+# Admin Configuration
+ADMIN_API_KEY=your_secure_admin_api_key
+```
+
+## Payment System
+
+The API uses Stripe for secure payment processing. The payment flow is as follows:
+
+1. Upload EPUB and get price:
+```bash
+POST /book-summary
+Content-Type: multipart/form-data
+file: your_book.epub
+
+Response:
+{
+  "success": true,
+  "summary": {
+    "total_chapters": 10,
+    "total_words": 50000,
+    "total_duration": 333.33,
+    "price": 6.47
+  },
+  "chapters": [...]
+}
+```
+
+2. Create payment intent:
+```bash
+POST /create-payment-intent
+Content-Type: application/json
+{
+  "job_id": "your_job_id",
+  "email": "user@example.com"
+}
+
+Response:
+{
+  "clientSecret": "pi_..._secret_...",
+  "amount": 647,
+  "transaction_id": "..."
+}
+```
+
+3. Process payment in frontend:
+```javascript
+// Using Stripe Elements
+const {error} = await stripe.confirmPayment({
+  clientSecret,
+  elements
+});
+```
+
+4. Webhook notification:
+- Configure your Stripe webhook to point to `/webhook`
+- The API will automatically start processing the book after successful payment
+
+## Admin Dashboard
+
+Secure admin endpoints for managing transactions:
+
+### List Transactions
+
+```bash
+GET /admin/transactions
+X-Admin-API-Key: your_admin_api_key
+
+# Optional status filter
+GET /admin/transactions?status=completed
+```
+
+### Transaction Details
+
+```bash
+GET /admin/transaction/{transaction_id}
+X-Admin-API-Key: your_admin_api_key
+
+Response:
+{
+  "transaction": {
+    "transaction_id": "...",
+    "stripe_payment_intent_id": "...",
+    "user_email": "...",
+    "amount": 6.47,
+    "status": "completed",
+    "created_at": "2024-...",
+    "epub_title": "...",
+    "word_count": 50000
+  },
+  "stripe_details": {...},
+  "job": {...}
+}
+```
+
+### Process Refund
+
+```bash
+POST /admin/refund/{transaction_id}
+X-Admin-API-Key: your_admin_api_key
+
+Response:
+{
+  "status": "success",
+  "refund": {...}
+}
+```
+
+## Pricing
+
+The pricing is calculated based on word count:
+
+- Up to 10,000 words: $3.00
+- Between 10,001 and 100,000 words: Proportional from $3.00 to $9.95
+- Over 100,000 words: $9.95 + $0.10 per additional 1,000 words
+
+## Security Features
+
+- Price verification before payment processing
+- Secure webhook handling with signature verification
+- Admin API key authentication
+- Database transaction safety
+- Automatic cleanup of temporary files
+- Email notifications for important events
+
+## Error Handling
+
+The API uses standard HTTP status codes and returns detailed error messages:
+
+```json
+{
+  "detail": {
+    "type": "value_error",
+    "msg": "Error description"
+  }
+}
+```
+
+Common error types:
+- `value_error`: Invalid input data
+- `upload_error`: File upload issues
+- `processing_error`: EPUB processing problems
+- `payment_error`: Payment-related issues
+
+## Development
+
+1. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+2. Set up environment variables in `.env`
+
+3. Run the server:
+```bash
+uvicorn api:app --reload
+```
+
+4. Configure Stripe webhook:
+```bash
+stripe listen --forward-to localhost:8000/webhook
+```
+
+## Production Considerations
+
+1. Use proper SSL/TLS certificates
+2. Set up proper CORS configuration
+3. Use production Stripe keys
+4. Configure proper database connection pooling
+5. Set up monitoring and logging
+6. Use secure admin API keys
+7. Configure proper email templates
+8. Set up backup systems for audio files
 
 ## Prerequisites
 
@@ -150,14 +342,6 @@ print(status.json())
 - `/uploads`: Temporary storage for uploaded EPUB files
 - `/processing`: Temporary directory for processing files
 - `/outputs`: Directory containing generated MP3 files
-
-## Error Handling
-
-The API uses standard HTTP status codes:
-- 200: Success
-- 400: Bad Request (invalid parameters)
-- 404: Not Found (job ID not found)
-- 500: Internal Server Error
 
 ## License
 
