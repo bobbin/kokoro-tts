@@ -94,7 +94,9 @@ except Exception as e:
     raise
 
 # Database configuration
-DATABASE_URL = "postgresql://neondb_owner:npg_yEa2POCRgNf5@ep-tight-dust-a4gcy3r9.us-east-1.aws.neon.tech/neondb"
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_yEa2POCRgNf5@ep-tight-dust-a4gcy3r9.us-east-1.aws.neon.tech/neondb")
+
+# Configure SQLAlchemy engine with proper SSL for Vercel
 engine = create_engine(
     DATABASE_URL,
     pool_size=5,
@@ -105,7 +107,7 @@ engine = create_engine(
     connect_args={
         "sslmode": "require",
         "connect_timeout": 10
-    }
+    } if "localhost" not in DATABASE_URL else {}
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
