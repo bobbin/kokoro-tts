@@ -94,21 +94,23 @@ except Exception as e:
     raise
 
 # Database configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_yEa2POCRgNf5@ep-tight-dust-a4gcy3r9.us-east-1.aws.neon.tech/neondb")
+DATABASE_URL = os.getenv("DATABASE_URL")
+print(DATABASE_URL)
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable is not set")
 
-# Configure SQLAlchemy engine with proper SSL for Vercel
+logger.info("Initializing database connection...")
+
+# Configure SQLAlchemy engine for Neon DB
 engine = create_engine(
     DATABASE_URL,
     pool_size=5,
     max_overflow=10,
     pool_timeout=30,
     pool_recycle=1800,
-    pool_pre_ping=True,
-    connect_args={
-        "sslmode": "require",
-        "connect_timeout": 10
-    } if "localhost" not in DATABASE_URL else {}
+    pool_pre_ping=True
 )
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
