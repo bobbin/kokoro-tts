@@ -122,8 +122,8 @@ try:
     brevo_configuration.api_key['api-key'] = BREVO_API_KEY
     brevo_api = TransactionalEmailsApi(ApiClient(brevo_configuration))
     
-    # Test the API key with a simple API call
-    brevo_api.get_account()
+    # Test the API key by getting smtp templates instead of get_account
+    brevo_api.get_smtp_templates()
     logger.info("Brevo API connection successful")
 except Exception as e:
     logger.error(f"Failed to initialize Brevo API: {e}")
