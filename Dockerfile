@@ -1,25 +1,27 @@
-FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
+FROM python:3.11-slim
 
-# Instalar dependencias del sistema
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    python3-pip \
-    python3-dev \
+    ffmpeg \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Directorio de trabajo
+# Set working directory
 WORKDIR /app
 
-# Copiar archivos necesarios
+# Copy only the necessary files
 COPY requirements.txt .
 COPY api.py .
-COPY kokoro-v0_19.onnx .
-COPY voices.json .
+COPY kokoro_tts/__init__.py ./kokoro_tts/__init__.py
 
-# Instalar dependencias de Python
-RUN pip3 install --no-cache-dir -r requirements.txt
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Puerto para FastAPI
-EXPOSE 8080
+# Create necessary directories
+RUN mkdir -p uploads outputs processing
 
-# Comando para iniciar la API
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
+# Expose port for FastAPI
+EXPOSE 8000
+
+# Command to start the API
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
