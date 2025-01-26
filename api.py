@@ -2,6 +2,9 @@ from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks, Form, F
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import stripe
 import shutil
 import os
@@ -61,11 +64,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Rate limiter configuration
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(
     title="Kokoro TTS API",
     description="API for converting EPUB books to audio using Kokoro TTS",
     version="1.0.0"
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Configurar CORS
 app.add_middleware(
@@ -433,7 +440,9 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Security(secu
     return credentials.credentials
 
 @app.post("/convert")
+@limiter.limit("5/hour")  # Límite de 5 conversiones por hora por IP
 async def convert_epub(
+    request: Request,  # Necesario para el rate limiting
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     voice: str = Form(...),
@@ -518,7 +527,12 @@ async def convert_epub(
             db.close()
 
 @app.get("/status/{job_id}")
-async def get_status(job_id: str, token: str = Depends(verify_token)):
+@limiter.limit("60/minute")  # 60 consultas por minuto por IP
+async def get_status(
+    request: Request,
+    job_id: str, 
+    token: str = Depends(verify_token)
+):
     """Get status of a conversion job"""
     try:
         db = get_db_with_retry()
@@ -537,7 +551,11 @@ async def get_status(job_id: str, token: str = Depends(verify_token)):
             db.close()
 
 @app.get("/voices")
-async def list_voices(token: str = Depends(verify_token)):
+@limiter.limit("30/minute")  # 30 consultas por minuto por IP
+async def list_voices(
+    request: Request,
+    token: str = Depends(verify_token)
+):
     """Get list of available voices"""
     try:
         response = client.predict(api_name="/initialize_model")
@@ -548,7 +566,11 @@ async def list_voices(token: str = Depends(verify_token)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/languages")
-async def list_languages(token: str = Depends(verify_token)):
+@limiter.limit("30/minute")  # 30 consultas por minuto por IP
+async def list_languages(
+    request: Request,
+    token: str = Depends(verify_token)
+):
     """Get list of supported languages"""
     # Since we don't have direct access to supported languages through the API,
     # we'll maintain a list of known supported languages
@@ -556,7 +578,9 @@ async def list_languages(token: str = Depends(verify_token)):
     return {"languages": languages}
 
 @app.post("/book-summary")
+@limiter.limit("10/minute")  # 10 consultas por minuto por IP
 async def get_book_summary(
+    request: Request,
     file: UploadFile = File(...),
     token: str = Depends(verify_token)
 ):
@@ -629,8 +653,10 @@ class AdminTransactionResponse(BaseModel):
     error: Optional[str]
 
 @app.post("/create-payment-intent")
+@limiter.limit("10/minute")  # 10 intentos de pago por minuto por IP
 async def create_payment_intent(
-    request: PaymentIntentRequest,
+    request: Request,
+    payment_request: PaymentIntentRequest,
     token: str = Depends(verify_token)
 ):
     """Create a Stripe PaymentIntent for a book conversion job"""
@@ -638,12 +664,12 @@ async def create_payment_intent(
         db = get_db_with_retry()
         
         # Get job details
-        job = db.query(Job).filter(Job.job_id == request.job_id).first()
+        job = db.query(Job).filter(Job.job_id == payment_request.job_id).first()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         
         # Verify email matches
-        if job.user_email != request.email:
+        if job.user_email != payment_request.email:
             raise HTTPException(status_code=403, detail="Email does not match job")
         
         # Re-calculate price to prevent manipulation
@@ -664,7 +690,7 @@ async def create_payment_intent(
                 currency="usd",
                 metadata={
                     "job_id": str(job.job_id),
-                    "email": request.email,
+                    "email": payment_request.email,
                     "epub_title": job.epub_title,
                     "word_count": summary["summary"]["total_words"]
                 }
@@ -674,7 +700,7 @@ async def create_payment_intent(
             transaction = Transaction(
                 transaction_id=uuid.uuid4(),
                 stripe_payment_intent_id=intent.id,
-                user_email=request.email,
+                user_email=payment_request.email,
                 amount=amount / 100,  # Store in dollars
                 status="pending",
                 epub_title=job.epub_title,
