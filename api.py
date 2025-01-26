@@ -1,7 +1,7 @@
-from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks, Form, File, Depends, Header, Request
+from fastapi import FastAPI, UploadFile, HTTPException, BackgroundTasks, Form, File, Depends, Header, Request, Security
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import APIKeyHeader
+from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 import stripe
 import shutil
 import os
@@ -416,6 +416,22 @@ async def process_epub(job_id: str, epub_path: str, voice: str, speed: float = 1
         email
     )
 
+# API Security configuration
+API_TOKEN = os.getenv("API_TOKEN")
+if not API_TOKEN:
+    raise ValueError("API_TOKEN environment variable is not set")
+
+security = HTTPBearer()
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
+    if credentials.credentials != API_TOKEN:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials.credentials
+
 @app.post("/convert")
 async def convert_epub(
     background_tasks: BackgroundTasks,
@@ -423,7 +439,8 @@ async def convert_epub(
     voice: str = Form(...),
     speed: float = Form(1.0),
     lang: str = Form("en-us"),
-    email: str = Form(...)
+    email: str = Form(...),
+    token: str = Depends(verify_token)
 ):
     """Convert EPUB to audio using Kokoro TTS"""
     try:
@@ -501,7 +518,7 @@ async def convert_epub(
             db.close()
 
 @app.get("/status/{job_id}")
-async def get_status(job_id: str):
+async def get_status(job_id: str, token: str = Depends(verify_token)):
     """Get status of a conversion job"""
     try:
         db = get_db_with_retry()
@@ -520,7 +537,7 @@ async def get_status(job_id: str):
             db.close()
 
 @app.get("/voices")
-async def list_voices():
+async def list_voices(token: str = Depends(verify_token)):
     """Get list of available voices"""
     try:
         response = client.predict(api_name="/initialize_model")
@@ -531,7 +548,7 @@ async def list_voices():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/languages")
-async def list_languages():
+async def list_languages(token: str = Depends(verify_token)):
     """Get list of supported languages"""
     # Since we don't have direct access to supported languages through the API,
     # we'll maintain a list of known supported languages
@@ -539,7 +556,10 @@ async def list_languages():
     return {"languages": languages}
 
 @app.post("/book-summary")
-async def get_book_summary(file: UploadFile = File(...)):
+async def get_book_summary(
+    file: UploadFile = File(...),
+    token: str = Depends(verify_token)
+):
     """Calculate book summary from EPUB file"""
     try:
         # Log received file
@@ -609,7 +629,10 @@ class AdminTransactionResponse(BaseModel):
     error: Optional[str]
 
 @app.post("/create-payment-intent")
-async def create_payment_intent(request: PaymentIntentRequest):
+async def create_payment_intent(
+    request: PaymentIntentRequest,
+    token: str = Depends(verify_token)
+):
     """Create a Stripe PaymentIntent for a book conversion job"""
     try:
         db = get_db_with_retry()
