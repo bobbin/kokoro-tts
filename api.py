@@ -5,7 +5,6 @@ from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredenti
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-import stripe
 import shutil
 import os
 import uuid
@@ -29,15 +28,11 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# Stripe configuration
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+# Admin API key configuration
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 
-if not all([STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, ADMIN_API_KEY]):
-    raise ValueError("Missing required environment variables for Stripe/Admin configuration")
-
-stripe.api_key = STRIPE_SECRET_KEY
+if not ADMIN_API_KEY:
+    raise ValueError("Missing required environment variables for Admin configuration")
 
 # Admin API key security
 api_key_header = APIKeyHeader(name="X-Admin-API-Key")
@@ -161,7 +156,7 @@ class Transaction(Base):
     __tablename__ = "transactions"
 
     transaction_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    stripe_payment_intent_id = Column(String, unique=True)
+    external_payment_id = Column(String, unique=True)
     user_email = Column(String, nullable=False)
     amount = Column(Float, nullable=False)  # Amount in USD
     status = Column(String, nullable=False)  # pending, completed, failed, refunded
@@ -637,13 +632,75 @@ async def get_book_summary(
             detail={"type": "server_error", "msg": str(e)}
         )
 
-class PaymentIntentRequest(BaseModel):
+class PaymentConfirmation(BaseModel):
     job_id: str
-    email: EmailStr
+    external_payment_id: str
+    user_email: EmailStr
+    amount: float
+
+@app.post("/confirm-payment")
+async def confirm_payment(
+    payment: PaymentConfirmation,
+    background_tasks: BackgroundTasks,
+    token: str = Depends(verify_token)
+):
+    """Confirm payment from external payment system and start processing"""
+    try:
+        db = get_db_with_retry()
+        
+        # Get job details
+        job = db.query(Job).filter(Job.job_id == payment.job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        # Verify email matches
+        if job.user_email != payment.user_email:
+            raise HTTPException(status_code=403, detail="Email does not match job")
+        
+        try:
+            # Create transaction record
+            transaction = Transaction(
+                transaction_id=uuid.uuid4(),
+                external_payment_id=payment.external_payment_id,
+                user_email=payment.user_email,
+                amount=payment.amount,
+                status="completed",
+                epub_title=job.epub_title
+            )
+            db.add(transaction)
+            
+            # Link transaction to job
+            job.transaction_id = transaction.transaction_id
+            db.commit()
+            
+            # Start processing in background
+            epub_path = os.path.join(UPLOAD_DIR, f"{job.job_id}.epub")
+            
+            background_tasks.add_task(
+                process_epub,
+                str(job.job_id),
+                epub_path,
+                job.voice,
+                job.speed,
+                job.language,
+                job.user_email
+            )
+            
+            return {
+                "status": "success",
+                "transaction_id": str(transaction.transaction_id)
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+            
+    finally:
+        if 'db' in locals():
+            db.close()
 
 class AdminTransactionResponse(BaseModel):
     transaction_id: str
-    stripe_payment_intent_id: str
+    external_payment_id: str
     user_email: str
     amount: float
     status: str
@@ -652,134 +709,6 @@ class AdminTransactionResponse(BaseModel):
     word_count: int
     error: Optional[str]
 
-@app.post("/create-payment-intent")
-@limiter.limit("10/minute")  # 10 intentos de pago por minuto por IP
-async def create_payment_intent(
-    request: Request,
-    payment_request: PaymentIntentRequest,
-    token: str = Depends(verify_token)
-):
-    """Create a Stripe PaymentIntent for a book conversion job"""
-    try:
-        db = get_db_with_retry()
-        
-        # Get job details
-        job = db.query(Job).filter(Job.job_id == payment_request.job_id).first()
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        # Verify email matches
-        if job.user_email != payment_request.email:
-            raise HTTPException(status_code=403, detail="Email does not match job")
-        
-        # Re-calculate price to prevent manipulation
-        epub_path = os.path.join(UPLOAD_DIR, f"{job.job_id}.epub")
-        if not os.path.exists(epub_path):
-            raise HTTPException(status_code=404, detail="EPUB file not found")
-        
-        summary = calculate_book_summary(epub_path)
-        if not summary["success"]:
-            raise HTTPException(status_code=400, detail="Could not calculate book price")
-        
-        amount = int(summary["summary"]["price"] * 100)  # Convert to cents for Stripe
-        
-        # Create Stripe PaymentIntent
-        try:
-            intent = stripe.PaymentIntent.create(
-                amount=amount,
-                currency="usd",
-                metadata={
-                    "job_id": str(job.job_id),
-                    "email": payment_request.email,
-                    "epub_title": job.epub_title,
-                    "word_count": summary["summary"]["total_words"]
-                }
-            )
-            
-            # Create transaction record
-            transaction = Transaction(
-                transaction_id=uuid.uuid4(),
-                stripe_payment_intent_id=intent.id,
-                user_email=payment_request.email,
-                amount=amount / 100,  # Store in dollars
-                status="pending",
-                epub_title=job.epub_title,
-                word_count=summary["summary"]["total_words"]
-            )
-            db.add(transaction)
-            
-            # Link transaction to job
-            job.transaction_id = transaction.transaction_id
-            db.commit()
-            
-            return {
-                "clientSecret": intent.client_secret,
-                "amount": amount,
-                "transaction_id": str(transaction.transaction_id)
-            }
-            
-        except stripe.error.StripeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-            
-    finally:
-        if 'db' in locals():
-            db.close()
-
-@app.post("/webhook")
-async def stripe_webhook(request: Request):
-    """Handle Stripe webhook events"""
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-    
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
-        )
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid payload")
-    except stripe.error.SignatureVerificationError:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    
-    if event["type"] == "payment_intent.succeeded":
-        payment_intent = event["data"]["object"]
-        
-        try:
-            db = get_db_with_retry()
-            
-            # Update transaction status
-            transaction = db.query(Transaction).filter(
-                Transaction.stripe_payment_intent_id == payment_intent.id
-            ).first()
-            
-            if transaction:
-                transaction.status = "completed"
-                
-                # Get associated job
-                job = transaction.job
-                if job:
-                    # Start processing in background
-                    background_tasks = BackgroundTasks()
-                    epub_path = os.path.join(UPLOAD_DIR, f"{job.job_id}.epub")
-                    
-                    background_tasks.add_task(
-                        process_epub,
-                        str(job.job_id),
-                        epub_path,
-                        job.voice,
-                        job.speed,
-                        job.language,
-                        job.user_email
-                    )
-                
-                db.commit()
-                
-        finally:
-            if 'db' in locals():
-                db.close()
-    
-    return {"status": "success"}
-
-# Admin Dashboard Endpoints
 @app.get("/admin/transactions", response_model=List[AdminTransactionResponse])
 async def get_transactions(
     status: Optional[str] = None,
@@ -814,15 +743,8 @@ async def get_transaction(
         if not transaction:
             raise HTTPException(status_code=404, detail="Transaction not found")
         
-        # Get Stripe payment details
-        try:
-            payment_intent = stripe.PaymentIntent.retrieve(transaction.stripe_payment_intent_id)
-        except stripe.error.StripeError:
-            payment_intent = None
-        
         return {
             "transaction": transaction,
-            "stripe_details": payment_intent,
             "job": transaction.job
         }
     finally:
@@ -834,7 +756,7 @@ async def refund_transaction(
     transaction_id: str,
     api_key: str = Depends(verify_admin_api_key)
 ):
-    """Refund a transaction"""
+    """Mark a transaction as refunded"""
     try:
         db = get_db_with_retry()
         transaction = db.query(Transaction).filter(
@@ -847,18 +769,10 @@ async def refund_transaction(
         if transaction.status != "completed":
             raise HTTPException(status_code=400, detail="Transaction cannot be refunded")
         
-        try:
-            refund = stripe.Refund.create(
-                payment_intent=transaction.stripe_payment_intent_id
-            )
-            
-            transaction.status = "refunded"
-            db.commit()
-            
-            return {"status": "success", "refund": refund}
-            
-        except stripe.error.StripeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        transaction.status = "refunded"
+        db.commit()
+        
+        return {"status": "success", "transaction": transaction}
             
     finally:
         if 'db' in locals():
