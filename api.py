@@ -17,7 +17,7 @@ import asyncio
 from gradio_client import Client
 import sib_api_v3_sdk
 from sib_api_v3_sdk import Configuration, ApiClient, TransactionalEmailsApi, SendSmtpEmail
-from sqlalchemy import create_engine, Column, String, Float, DateTime, Text, Boolean, Integer, ForeignKey
+from sqlalchemy import create_engine, Column, String, Float, DateTime, Text, Boolean, Integer, ForeignKey, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -113,6 +113,15 @@ engine = create_engine(
     pool_pre_ping=True
 )
 
+# Verify database connection
+try:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+        logger.info("✅ Database connection successful")
+except Exception as e:
+    logger.error(f"❌ Database connection failed: {e}", exc_info=True)
+    raise
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -167,8 +176,18 @@ class Transaction(Base):
     error = Column(Text)
     job = relationship("Job", back_populates="transaction", uselist=False)
 
-# Create tables
+# Drop and recreate tables
+Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
+
+# Verify database connection
+try:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+        logger.info("✅ Database connection successful")
+except Exception as e:
+    logger.error(f"❌ Database connection failed: {e}", exc_info=True)
+    raise
 
 # Retry decorator for database operations
 @retry(
@@ -179,8 +198,8 @@ Base.metadata.create_all(bind=engine)
 def get_db_with_retry():
     db = SessionLocal()
     try:
-        # Test the connection
-        db.execute("SELECT 1")
+        # Test the connection using text()
+        db.execute(text("SELECT 1"))
         return db
     except Exception as e:
         db.close()
@@ -437,7 +456,7 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Security(secu
 @app.post("/convert")
 @limiter.limit("5/hour")  # Límite de 5 conversiones por hora por IP
 async def convert_epub(
-    request: Request,  # Necesario para el rate limiting
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     voice: str = Form(...),
@@ -447,6 +466,8 @@ async def convert_epub(
     token: str = Depends(verify_token)
 ):
     """Convert EPUB to audio using Kokoro TTS"""
+    db = None
+    epub_path = None
     try:
         db = get_db_with_retry()
         logger.info(f"Received request - File: {file.filename}, Voice: {voice}, Speed: {speed}, Lang: {lang}, Email: {email}")
@@ -472,6 +493,7 @@ async def convert_epub(
             with open(epub_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
         except Exception as e:
+            logger.error(f"Error saving uploaded file: {e}")
             raise HTTPException(
                 status_code=500,
                 detail={"type": "upload_error", "msg": f"Error saving uploaded file: {str(e)}"}
@@ -479,6 +501,7 @@ async def convert_epub(
         
         # Create job in database with retry
         try:
+            logger.info(f"Creating new job in database with ID: {job_id}")
             new_job = Job(
                 job_id=job_id,
                 user_email=email,
@@ -488,14 +511,26 @@ async def convert_epub(
                 speed=speed,
                 language=lang
             )
+            logger.debug(f"Job object created: {new_job.__dict__}")
+            
             db.add(new_job)
-            db.commit()
+            logger.debug("Job added to session")
+            
+            try:
+                db.commit()
+                logger.info("Job successfully committed to database")
+            except Exception as commit_error:
+                logger.error(f"Error committing job to database: {commit_error}")
+                db.rollback()
+                raise
+                
         except Exception as e:
-            logger.error(f"Error creating job in database: {e}")
-            db.rollback()
+            logger.error(f"Error creating job in database: {e}", exc_info=True)
+            if epub_path and os.path.exists(epub_path):
+                os.remove(epub_path)
             raise HTTPException(
                 status_code=500,
-                detail={"type": "database_error", "msg": "Error creating job in database"}
+                detail={"type": "database_error", "msg": f"Error creating job in database: {str(e)}"}
             )
         
         # Start processing in background
@@ -511,14 +546,18 @@ async def convert_epub(
         
         return {"job_id": job_id}
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error in convert_epub: {e}")
+        logger.error(f"Error in convert_epub: {e}", exc_info=True)
+        if epub_path and os.path.exists(epub_path):
+            os.remove(epub_path)
         raise HTTPException(
             status_code=500,
             detail={"type": "server_error", "msg": str(e)}
         )
     finally:
-        if 'db' in locals():
+        if db is not None:
             db.close()
 
 @app.get("/status/{job_id}")
