@@ -24,6 +24,10 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.pool import QueuePool
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv
+import requests
+import json
+import boto3
+from botocore.exceptions import ClientError
 
 # Load environment variables from .env file
 load_dotenv()
@@ -82,8 +86,15 @@ app.add_middleware(
 UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "outputs"
 PROCESSING_DIR = "processing"
+
+# Create necessary directories
 for dir_path in [UPLOAD_DIR, OUTPUT_DIR, PROCESSING_DIR]:
-    os.makedirs(dir_path, exist_ok=True)
+    try:
+        os.makedirs(dir_path, exist_ok=True)
+        logger.info(f"✅ Directory created/verified: {dir_path}")
+    except Exception as e:
+        logger.error(f"❌ Error creating directory {dir_path}: {e}")
+        raise
 
 # Initialize thread pool
 thread_pool = ThreadPoolExecutor(max_workers=3)  # Ajusta según necesidades
@@ -141,6 +152,39 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize Brevo API: {e}")
     raise
+
+# AWS Configuration
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+S3_EPUB_BUCKET = os.getenv("S3_EPUB_BUCKET")
+S3_OUTPUT_BUCKET = os.getenv("S3_OUTPUT_BUCKET")
+
+# Initialize S3 client
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION
+)
+
+def upload_to_s3(file_path: str, bucket: str, object_name: str) -> bool:
+    """Upload a file to an S3 bucket"""
+    try:
+        s3_client.upload_file(file_path, bucket, object_name)
+        return True
+    except ClientError as e:
+        logger.error(f"Error uploading to S3: {e}")
+        return False
+
+def get_s3_url(bucket: str, object_name: str) -> str:
+    """Get the public URL for an S3 object"""
+    if bucket == S3_OUTPUT_BUCKET:
+        # El bucket de outputs está en eu-west-1
+        return f"https://{bucket}.s3-eu-west-1.amazonaws.com/{object_name}"
+    else:
+        # Para otros buckets usamos la región configurada
+        return f"https://{bucket}.s3.{AWS_REGION}.amazonaws.com/{object_name}"
 
 # Database Models
 class Job(Base):
@@ -241,7 +285,7 @@ async def send_completion_email(email: str, job_id: str, output_url: str):
         logger.info(f"Found template: {template_name} (ID: {template_id})")
         
         # Prepare email parameters
-        sender = {"name": "Kokoro TTS", "email": "jaldao27@gmail.com"}
+        sender = {"name": "E2AC-One Bot - Awesome Apps", "email": "awesomeapps@udumee.com"}
         to = [{"email": email}]
         
         # Parameters that will replace variables in the template
@@ -291,6 +335,9 @@ class ConversionRequest(BaseModel):
 
 def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.0, lang: str = "en-us", email: str = None):
     """Synchronous processing function to run in thread pool"""
+    db = None
+    split_output = None
+    job_output_dir = None
     try:
         db = get_db_with_retry()
         # Update job status in database
@@ -379,48 +426,63 @@ def process_epub_sync(job_id: str, epub_path: str, voice: str, speed: float = 1.
             
             combined.export(output_file, format="mp3")
             
-            # Update job status
-            job.status = "completed"
-            job.progress = 100.0
-            job.output_file = output_file
-            db.commit()
+            # Upload output file to S3
+            output_s3_key = f"outputs/{job_id}/{title}.mp3"
+            if upload_to_s3(output_file, S3_OUTPUT_BUCKET, output_s3_key):
+                # Get public URL
+                output_url = get_s3_url(S3_OUTPUT_BUCKET, output_s3_key)
+                
+                # Update job status
+                job.status = "completed"
+                job.progress = 100.0
+                job.output_file = output_url
+                db.commit()
 
-            # Send completion email
-            if email:
-                # Generate download URL based on your domain and setup
-                base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
-                download_url = f"{base_url}/download/{job_id}"
-                # Use asyncio.run since we're in a sync function
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(send_completion_email(email, str(job_id), download_url))
-                finally:
-                    loop.close()
+                # Send completion email
+                if email:
+                    # Use the S3 URL for download
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(send_completion_email(email, str(job_id), output_url))
+                    finally:
+                        loop.close()
+            else:
+                raise RuntimeError("Failed to upload output file to S3")
         else:
             raise FileNotFoundError("No chapter files found to merge")
-        
-        # Cleanup
-        shutil.rmtree(split_output)
         
     except Exception as e:
         logger.error(f"Error processing job {job_id}: {e}")
         try:
-            job.status = "failed"
-            job.error = str(e)
-            db.commit()
+            if job:
+                job.status = "failed"
+                job.error = str(e)
+                db.commit()
         except Exception as commit_error:
             logger.error(f"Error updating job status: {commit_error}")
         
-        if os.path.exists(job_output_dir):
-            shutil.rmtree(job_output_dir)
-        
     finally:
-        if os.path.exists(epub_path):
-            os.remove(epub_path)
-        if os.path.exists(split_output):
-            shutil.rmtree(split_output)
-        if 'db' in locals():
+        # Clean up all temporary files and directories
+        if split_output and os.path.exists(split_output):
+            try:
+                shutil.rmtree(split_output)
+            except Exception as e:
+                logger.error(f"Error cleaning up split_output directory: {e}")
+        
+        if job_output_dir and os.path.exists(job_output_dir):
+            try:
+                shutil.rmtree(job_output_dir)
+            except Exception as e:
+                logger.error(f"Error cleaning up job_output_dir directory: {e}")
+        
+        if epub_path and os.path.exists(epub_path):
+            try:
+                os.remove(epub_path)
+            except Exception as e:
+                logger.error(f"Error removing epub file: {e}")
+        
+        if db is not None:
             db.close()
 
 async def process_epub(job_id: str, epub_path: str, voice: str, speed: float = 1.0, lang: str = "en-us", email: str = None):
@@ -454,7 +516,7 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Security(secu
     return credentials.credentials
 
 @app.post("/convert")
-@limiter.limit("5/hour")  # Límite de 5 conversiones por hora por IP
+@limiter.limit("15/hour")  # Límite de 5 conversiones por hora por IP
 async def convert_epub(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -468,6 +530,7 @@ async def convert_epub(
     """Convert EPUB to audio using Kokoro TTS"""
     db = None
     epub_path = None
+    metadata_path = None
     try:
         db = get_db_with_retry()
         logger.info(f"Received request - File: {file.filename}, Voice: {voice}, Speed: {speed}, Lang: {lang}, Email: {email}")
@@ -489,6 +552,7 @@ async def convert_epub(
         job_id = str(uuid.uuid4())
         epub_path = os.path.join(UPLOAD_DIR, f"{job_id}.epub")
         
+        # Save EPUB locally first
         try:
             with open(epub_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
@@ -497,6 +561,35 @@ async def convert_epub(
             raise HTTPException(
                 status_code=500,
                 detail={"type": "upload_error", "msg": f"Error saving uploaded file: {str(e)}"}
+            )
+        
+        # Upload EPUB to S3
+        epub_s3_key = f"epubs/{job_id}/{file.filename}"
+        if not upload_to_s3(epub_path, S3_EPUB_BUCKET, epub_s3_key):
+            raise HTTPException(
+                status_code=500,
+                detail={"type": "s3_error", "msg": "Error uploading EPUB to S3"}
+            )
+        
+        # Save request metadata to S3
+        metadata = {
+            "job_id": job_id,
+            "filename": file.filename,
+            "voice": voice,
+            "speed": speed,
+            "language": lang,
+            "email": email,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        metadata_path = os.path.join(UPLOAD_DIR, f"{job_id}_metadata.json")
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        
+        metadata_s3_key = f"epubs/{job_id}/metadata.json"
+        if not upload_to_s3(metadata_path, S3_EPUB_BUCKET, metadata_s3_key):
+            raise HTTPException(
+                status_code=500,
+                detail={"type": "s3_error", "msg": "Error uploading metadata to S3"}
             )
         
         # Create job in database with retry
@@ -509,7 +602,8 @@ async def convert_epub(
                 progress=0.0,
                 voice=voice,
                 speed=speed,
-                language=lang
+                language=lang,
+                epub_title=file.filename
             )
             logger.debug(f"Job object created: {new_job.__dict__}")
             
@@ -526,8 +620,6 @@ async def convert_epub(
                 
         except Exception as e:
             logger.error(f"Error creating job in database: {e}", exc_info=True)
-            if epub_path and os.path.exists(epub_path):
-                os.remove(epub_path)
             raise HTTPException(
                 status_code=500,
                 detail={"type": "database_error", "msg": f"Error creating job in database: {str(e)}"}
@@ -544,14 +636,26 @@ async def convert_epub(
             email
         )
         
+        # No eliminamos el archivo EPUB aquí, se eliminará después del procesamiento
+        if metadata_path and os.path.exists(metadata_path):
+            os.remove(metadata_path)
+        
         return {"job_id": job_id}
         
     except HTTPException:
+        # En caso de error, limpiamos los archivos
+        if epub_path and os.path.exists(epub_path):
+            os.remove(epub_path)
+        if metadata_path and os.path.exists(metadata_path):
+            os.remove(metadata_path)
         raise
     except Exception as e:
         logger.error(f"Error in convert_epub: {e}", exc_info=True)
+        # En caso de error, limpiamos los archivos
         if epub_path and os.path.exists(epub_path):
             os.remove(epub_path)
+        if metadata_path and os.path.exists(metadata_path):
+            os.remove(metadata_path)
         raise HTTPException(
             status_code=500,
             detail={"type": "server_error", "msg": str(e)}

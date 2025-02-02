@@ -802,6 +802,31 @@ def calculate_book_summary(epub_file):
             "error": "No chapters were extracted from the EPUB file"
         }
     
+    # Get book metadata
+    book_title = None
+    book_author = None
+    try:
+        import ebooklib
+        from ebooklib import epub
+        book = epub.read_epub(epub_file)
+        
+        # Try to get title from metadata
+        if book.get_metadata('DC', 'title'):
+            book_title = book.get_metadata('DC', 'title')[0][0]
+        
+        # Try to get author from metadata
+        if book.get_metadata('DC', 'creator'):
+            book_author = book.get_metadata('DC', 'creator')[0][0]
+        
+        # If no title in metadata, use filename
+        if not book_title:
+            book_title = os.path.splitext(os.path.basename(epub_file))[0]
+            
+    except Exception as e:
+        logger.warning(f"Could not extract metadata from EPUB: {e}")
+        book_title = os.path.splitext(os.path.basename(epub_file))[0]
+        book_author = "Unknown"
+    
     # Calculate summary
     total_words = sum(len(chapter['content'].split()) for chapter in chapters)
     
@@ -818,11 +843,13 @@ def calculate_book_summary(epub_file):
     
     return {
         "success": True,
+        "title": book_title,
+        "author": book_author,
         "summary": {
             "total_chapters": len(chapters),
             "total_words": total_words,
             "total_duration": total_words / 150,  # minutes
-            "price": price  # Add price to summary
+            "price": price
         },
         "chapters": chapter_list
     }
