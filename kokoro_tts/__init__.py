@@ -776,19 +776,19 @@ def calcular_precio(palabras):
     """
     Calcula el precio de traducción de un libro según la cantidad de palabras.
     - Hasta 10,000 palabras: $3
-    - Entre 10,001 y 100,000 palabras: proporcional entre $3 y $9.95
-    - Más de 100,000 palabras: $9.95 por las primeras 100,000 palabras + $0.10 por cada 1,000 palabras adicionales
+    - Entre 10,001 y 150,000 palabras: proporcional entre $3 y $9.95
+    - Más de 150,000 palabras: $9.95 por las primeras 150,000 palabras + $0.10 por cada 1,000 palabras adicionales
     """
-    if palabras <= 10000:
+    if palabras <= 20000:
         return 3.00
-    elif palabras <= 100000:
-        # Proporcional entre 10,001 y 100,000 palabras
-        precio = 3 + ((palabras - 10000) / 90000) * (9.95 - 3)
+    elif palabras <= 150000:
+        # Proporcional entre 20,001 y 150,000 palabras
+        precio = 3 + ((palabras - 20000) / 130000) * (9.95 - 3)
         return round(precio, 2)
     else:
         # Más de 100,000 palabras
         precio_base = 9.95  # Por las primeras 100,000 palabras
-        palabras_adicionales = palabras - 100000
+        palabras_adicionales = palabras - 150000
         precio_extra = (palabras_adicionales / 1000) * 0.10
         return round(precio_base + precio_extra, 2)
 
